@@ -1,0 +1,50 @@
+{
+  "name": "eigetsu-web",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:api:dev\" \"npm:sfu:dev\" \"npm:client:dev\"",
+    "api:dev": "npm --prefix api run start:dev",
+    "sfu:dev": "npm --prefix sfu run dev",
+    "client:dev": "vite --host 0.0.0.0",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit && npm --prefix sfu run typecheck && npm --prefix api exec -- tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "test": "node --test tests/*.test.ts",
+    "test:bitrate": "node tests/bitrate-browser.ts",
+    "check:gpu": "node tests/bitrate-browser.ts --gpu",
+    "test:compatibility": "node tests/bitrate-browser.ts --compatibility",
+    "test:audio": "node tests/bitrate-browser.ts --audio",
+    "test:controls": "node tests/bitrate-browser.ts --controls"
+  },
+  "dependencies": {
+    "mediasoup-client": "^3.15.6",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-basic-ssl": "^1.2.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.9",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.0",
+    "vite": "^6.4.3"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

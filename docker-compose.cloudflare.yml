@@ -1,0 +1,7 @@
+services:
+  web:
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS to your public hostname}
+      CF_API_TOKEN: ${CF_API_TOKEN:?Set CF_API_TOKEN with Zone DNS Edit and Zone Read}
+    volumes:
+      - ./docker/Caddyfile.cloudflare:/etc/caddy/Caddyfile:ro

@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+FROM node:26.9.0-trixie-slim AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 python3-pip build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app/sfu
+COPY sfu/package.json sfu/package-lock.json ./
+# Prefer the prebuilt worker, with a working source-build fallback.
+ARG MEDIASOUP_SKIP_WORKER_PREBUILT_DOWNLOAD=
+RUN --mount=type=cache,target=/root/.npm \
+    --mount=type=cache,target=/root/.cache/pip \
+    PYTHON=/usr/bin/python3 \
+    MEDIASOUP_SKIP_WORKER_PREBUILT_DOWNLOAD=${MEDIASOUP_SKIP_WORKER_PREBUILT_DOWNLOAD} \
+    npm ci --no-audit --no-fund
+# Keep the worker binary at the path expected by mediasoup, without its sources.
+RUN install -m 755 node_modules/mediasoup/worker/out/Release/mediasoup-worker /tmp/mediasoup-worker \
+    && rm -rf node_modules/mediasoup/worker \
+    && mkdir -p node_modules/mediasoup/worker/out/Release \
+    && mv /tmp/mediasoup-worker node_modules/mediasoup/worker/out/Release/mediasoup-worker
+COPY sfu/tsconfig.json sfu/*.ts ./
+RUN npm run build
+
+FROM build AS production-dependencies
+RUN --mount=type=cache,target=/root/.npm npm prune --omit=dev --offline --no-audit --no-fund
+
+FROM gcr.io/distroless/nodejs26-debian13:nonroot
+WORKDIR /app/sfu
+COPY --from=build /app/sfu/package.json ./package.json
+COPY --from=production-dependencies /app/sfu/node_modules ./node_modules
+COPY --from=build /app/sfu/dist ./dist
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
+CMD ["dist/index.js"]

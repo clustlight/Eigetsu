@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+FROM node:26.9.0-trixie-slim AS dependencies
+WORKDIR /app
+COPY api/package.json api/package-lock.json ./
+
+FROM dependencies AS production-dependencies
+RUN --mount=type=cache,target=/root/.npm npm ci --omit=dev --no-audit --no-fund
+
+FROM dependencies AS build
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+COPY api/nest-cli.json api/tsconfig.json ./
+COPY api/src ./src
+RUN npm run build
+
+FROM gcr.io/distroless/nodejs26-debian13:nonroot
+WORKDIR /app
+COPY --from=build /app/package.json ./package.json
+COPY --from=production-dependencies /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+ENV NODE_ENV=production
+ENV PORT=3001
+EXPOSE 3001
+CMD ["dist/main.js"]

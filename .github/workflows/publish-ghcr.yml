@@ -1,0 +1,81 @@
+name: Publish container images
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version (for example 1.2.3 or 1.2.3-rc.1; omit the leading v)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.service }} image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, api, sfu]
+        include:
+          - service: web
+            dockerfile: docker/Dockerfile.web
+          - service: api
+            dockerfile: docker/Dockerfile.api
+          - service: sfu
+            dockerfile: docker/Dockerfile.sfu
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate version and prepare image tags
+        id: tags
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          node <<'NODE'
+          const version = process.env.VERSION;
+          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
+          if (!semver.test(version)) {
+            console.error(`Invalid SemVer: ${version}. Use X.Y.Z or X.Y.Z-prerelease without a leading v or build metadata.`);
+            process.exit(1);
+          }
+          NODE
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/eigetsu-${SERVICE}"
+          {
+            echo "tags<<EOF"
+            echo "${image}:${VERSION}"
+            if [[ "$VERSION" != *-* ]]; then
+              echo "${image}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ inputs.version }}

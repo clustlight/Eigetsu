@@ -1,0 +1,54 @@
+services:
+  web:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER to the lowercase GitHub owner}/eigetsu-web:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+      CF_API_TOKEN: ${CF_API_TOKEN:-}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+  api:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER to the lowercase GitHub owner}/eigetsu-api:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      SFU_URL: http://sfu:3000
+    expose:
+      - '3001'
+    depends_on:
+      - sfu
+
+  sfu:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER to the lowercase GitHub owner}/eigetsu-sfu:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.sfu
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      RTC_MIN_PORT: ${RTC_MIN_PORT:-40000}
+      RTC_MAX_PORT: ${RTC_MAX_PORT:-40100}
+      MEDIASOUP_ANNOUNCED_IP: ${MEDIASOUP_ANNOUNCED_IP:-127.0.0.1}
+    expose:
+      - '3000'
+    ports:
+      - '${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}:${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}/udp'
+      - '${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}:${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}/tcp'
+
+volumes:
+  caddy_data:
+  caddy_config:
