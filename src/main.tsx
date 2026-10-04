@@ -213,40 +213,41 @@ function StreamQuality({ share }: { share: Share }) {
   const surfaceLabel = (
     { window: 'ウィンドウ', monitor: '画面全体', browser: 'ブラウザータブ' } as Record<string, string>
   )[captureSurface || ''];
-  const details = stats
-    ? [
-        share.local ? `送信上限: ${share.maxBitrate / 1_000_000} Mbps` : null,
-        stats.codec ? `コーデック: ${stats.codec}` : null,
-        stats.codecProfile ? `H.264プロファイル: ${stats.codecProfile}` : null,
-        share.local && share.compatibilityActive ? '互換配信: 1080p / 60 FPS設定（追加エンコード）' : null,
-        surfaceLabel ? `取り込み種別: ${surfaceLabel}` : null,
-        stats.width && stats.height ? `${share.local ? '実送信' : '実受信'}: ${stats.width} × ${stats.height}` : null,
-        stats.sourceFps != null ? `取り込み実測: ${stats.sourceFps.toFixed(1)} FPS` : null,
-        stats.receivedFps != null ? `受信: ${stats.receivedFps.toFixed(1)} FPS` : null,
-        stats.fps != null ? `${share.local ? '送信' : 'デコード'}: ${stats.fps.toFixed(1)} FPS` : null,
-        stats.playbackFps != null
-          ? `${share.local ? 'プレビュー' : '再生'}: ${stats.playbackFps.toFixed(1)} FPS`
-          : null,
-        stats.encodeMs != null ? `エンコード: ${stats.encodeMs.toFixed(1)} ms/フレーム` : null,
-        stats.decodeMs != null ? `デコード: ${stats.decodeMs.toFixed(1)} ms/フレーム` : null,
-        `${share.local ? 'エンコーダー実装' : 'デコーダー実装'}: ${(share.local ? stats.encoder : stats.decoder) || '取得不可'}`,
-        `${share.local ? '省電力エンコード' : '省電力デコード'}: ${stats.powerEfficient == null ? '取得不可' : stats.powerEfficient ? '有効' : '無効'}`,
-        stats.protocol ? `接続: ${stats.protocol.toUpperCase()}` : null,
-        stats.rttMs != null ? `RTT: ${stats.rttMs.toFixed(1)} ms` : null,
-        share.local && stats.availableOutgoingMbps != null
-          ? `送信帯域推定: ${stats.availableOutgoingMbps.toFixed(1)} Mbps`
-          : null,
-        stats.remoteLossPercent != null ? `SFU受信損失（直近RTCP）: ${stats.remoteLossPercent.toFixed(2)}%` : null,
-        stats.sendQueueMs != null ? `送信待ち: ${stats.sendQueueMs.toFixed(1)} ms/パケット` : null,
-        stats.lossPercent != null ? `パケット損失: ${stats.lossPercent.toFixed(2)}%` : null,
-        stats.bufferMs != null ? `受信バッファ実測: ${stats.bufferMs.toFixed(1)} ms` : null,
-        stats.dropped != null ? `受信破棄: ${stats.dropped} フレーム/直近2秒` : null,
-        stats.playbackDropped != null ? `再生破棄: ${stats.playbackDropped} フレーム/直近2秒` : null,
-        stats.freezes != null ? `再生停止: ${stats.freezes} 回/直近2秒` : null,
-        stats.targetBitrateMbps != null ? `エンコーダー目標: ${stats.targetBitrateMbps.toFixed(1)} Mbps` : null,
-        share.local ? `画質制限: ${limitation}` : null,
-      ].filter((detail): detail is string => Boolean(detail))
-    : [];
+  const unavailable = '情報なし';
+  const details = [
+    ...(share.local ? [`送信上限: ${share.maxBitrate / 1_000_000} Mbps`] : []),
+    `コーデック: ${stats?.codec || unavailable}`,
+    `H.264プロファイル: ${stats?.codecProfile || unavailable}`,
+    ...(share.local
+      ? [`互換配信: ${share.compatibilityActive ? '1080p / 60 FPS設定（追加エンコード）' : '無効'}`]
+      : []),
+    `取り込み種別: ${surfaceLabel || unavailable}`,
+    `${share.local ? '実送信' : '実受信'}: ${stats?.width && stats?.height ? `${stats.width} × ${stats.height}` : unavailable}`,
+    `取り込み実測: ${stats?.sourceFps != null ? `${stats.sourceFps.toFixed(1)} FPS` : unavailable}`,
+    `受信: ${stats?.receivedFps != null ? `${stats.receivedFps.toFixed(1)} FPS` : unavailable}`,
+    `${share.local ? '送信' : 'デコード'}: ${stats?.fps != null ? `${stats.fps.toFixed(1)} FPS` : unavailable}`,
+    `${share.local ? 'プレビュー' : '再生'}: ${stats?.playbackFps != null ? `${stats.playbackFps.toFixed(1)} FPS` : unavailable}`,
+    `エンコード: ${stats?.encodeMs != null ? `${stats.encodeMs.toFixed(1)} ms/フレーム` : unavailable}`,
+    `デコード: ${stats?.decodeMs != null ? `${stats.decodeMs.toFixed(1)} ms/フレーム` : unavailable}`,
+    `${share.local ? 'エンコーダー実装' : 'デコーダー実装'}: ${(share.local ? stats?.encoder : stats?.decoder) || unavailable}`,
+    `${share.local ? '省電力エンコード' : '省電力デコード'}: ${stats?.powerEfficient == null ? unavailable : stats.powerEfficient ? '有効' : '無効'}`,
+    `接続: ${stats?.protocol?.toUpperCase() || unavailable}`,
+    `RTT: ${stats?.rttMs != null ? `${stats.rttMs.toFixed(1)} ms` : unavailable}`,
+    ...(share.local
+      ? [
+          `送信帯域推定: ${stats?.availableOutgoingMbps != null ? `${stats.availableOutgoingMbps.toFixed(1)} Mbps` : unavailable}`,
+        ]
+      : []),
+    `SFU受信損失（直近RTCP）: ${stats?.remoteLossPercent != null ? `${stats.remoteLossPercent.toFixed(2)}%` : unavailable}`,
+    `送信待ち: ${stats?.sendQueueMs != null ? `${stats.sendQueueMs.toFixed(1)} ms/パケット` : unavailable}`,
+    `パケット損失: ${stats?.lossPercent != null ? `${stats.lossPercent.toFixed(2)}%` : unavailable}`,
+    `受信バッファ実測: ${stats?.bufferMs != null ? `${stats.bufferMs.toFixed(1)} ms` : unavailable}`,
+    `受信破棄: ${stats?.dropped != null ? `${stats.dropped} フレーム/直近2秒` : unavailable}`,
+    `再生破棄: ${stats?.playbackDropped != null ? `${stats.playbackDropped} フレーム/直近2秒` : unavailable}`,
+    `再生停止: ${stats?.freezes != null ? `${stats.freezes} 回/直近2秒` : unavailable}`,
+    `エンコーダー目標: ${stats?.targetBitrateMbps != null ? `${stats.targetBitrateMbps.toFixed(1)} Mbps` : unavailable}`,
+    ...(share.local ? [`画質制限: ${limitation}`] : []),
+  ];
   const fps = !share.local && stats?.playbackFps != null ? stats.playbackFps : stats?.fps;
   const fpsLabel = share.local ? '送信' : stats?.playbackFps != null ? '再生' : 'デコード';
   return (
@@ -256,15 +257,11 @@ function StreamQuality({ share }: { share: Share }) {
         {stats?.bitrateMbps != null && ` · ${stats.bitrateMbps.toFixed(1)} Mbps`}
         {fps != null && ` · ${fpsLabel} ${fps.toFixed(0)} FPS`}
       </div>
-      {details.length ? (
-        <div className="diagnostic-metrics">
-          {details.map((detail) => (
-            <span key={detail.split(':')[0]}>{detail}</span>
-          ))}
-        </div>
-      ) : (
-        <p className="diagnostic-wait">診断情報を取得しています…</p>
-      )}
+      <div className="diagnostic-metrics">
+        {details.map((detail) => (
+          <span key={detail.split(':')[0]}>{detail}</span>
+        ))}
+      </div>
     </section>
   );
 }

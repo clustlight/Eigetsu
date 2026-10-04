@@ -13,8 +13,8 @@ test('every screen preset disables voice processing without changing video quali
     assert.equal(options.audio.channelCount.ideal, 2);
     assert.equal(options.video.width.ideal, preset.width);
     assert.equal(options.video.height.ideal, preset.height);
-    assert.equal(options.video.width.max, preset.width);
-    assert.equal(options.video.height.max, preset.height);
+    assert.equal(options.video.width.max, undefined);
+    assert.equal(options.video.height.max, undefined);
     assert.equal(options.video.frameRate.max, preset.fps);
   }
 });

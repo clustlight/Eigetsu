@@ -1972,28 +1972,28 @@ body {
   flex: 1 1 0;
 }
 
-/* Expanded views keep the controls outside the video while hidden. */
-.share-grid.is-focused [data-player-controls],
+/* Expanded controls stay visible, except when the player is fullscreen. */
+.share-grid.is-focused:fullscreen [data-player-controls],
 .focus-window [data-player-controls] {
   opacity: 0;
   pointer-events: none;
   transition: opacity 160ms ease;
 }
-.share-grid.is-focused.controls-visible [data-player-controls],
+.share-grid.is-focused:fullscreen.controls-visible [data-player-controls],
 .focus-window.controls-visible [data-player-controls],
-.share-grid.is-focused [data-player-controls]:has(:focus-visible),
+.share-grid.is-focused:fullscreen [data-player-controls]:has(:focus-visible),
 .focus-window [data-player-controls]:has(:focus-visible) {
   opacity: 1;
   pointer-events: auto;
 }
-.share-grid.is-focused.cursor-idle:not(:has(:focus-visible)),
-.share-grid.is-focused.cursor-idle:not(:has(:focus-visible)) *,
+.share-grid.is-focused:fullscreen.cursor-idle:not(:has(:focus-visible)),
+.share-grid.is-focused:fullscreen.cursor-idle:not(:has(:focus-visible)) *,
 .focus-window.cursor-idle:not(:has(:focus-visible)),
 .focus-window.cursor-idle:not(:has(:focus-visible)) * {
   cursor: none !important;
 }
 @media (prefers-reduced-motion: reduce) {
-  .share-grid.is-focused [data-player-controls],
+  .share-grid.is-focused:fullscreen [data-player-controls],
   .focus-window [data-player-controls] {
     transition: none;
   }

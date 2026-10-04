@@ -9,8 +9,11 @@ interface ScreenCaptureOptions extends DisplayMediaStreamOptions {
 export function screenShareCaptureOptions(preset: QualityPreset): ScreenCaptureOptions {
   return {
     video: {
-      width: { ideal: preset.width, max: preset.width },
-      height: { ideal: preset.height, max: preset.height },
+      // Let the browser capture the display at its native size. The sender
+      // applies the preset's downscale after capture; max constraints here can
+      // cause some capture implementations to return a much smaller track.
+      width: { ideal: preset.width },
+      height: { ideal: preset.height },
       frameRate: { ideal: preset.fps, max: preset.fps },
     },
     audio: {
