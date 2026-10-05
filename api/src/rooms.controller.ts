@@ -1,5 +1,6 @@
-import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { Controller, Get } from '@nestjs/common';
 import { RoomsService } from './rooms.service';
+import { listRooms } from './rooms-controller-logic';
 
 @Controller()
 export class RoomsController {
@@ -12,10 +13,6 @@ export class RoomsController {
 
   @Get('api/rooms')
   async list() {
-    try {
-      return await this.rooms.list();
-    } catch {
-      throw new ServiceUnavailableException('The media server is unavailable');
-    }
+    return listRooms(this.rooms);
   }
 }

@@ -1,0 +1,80 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  api-config:
+    name: API and Caddy tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+
+      - name: Install API dependencies
+        working-directory: api
+        run: npm ci --no-audit --no-fund
+
+      - name: Run API and Caddy tests
+        run: npm run test:api-config
+
+  client-logic:
+    name: Client logic tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install client and test dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run client logic tests
+        run: npm run test:client-logic
+
+  sfu-integration:
+    name: SFU and mediasoup tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            sfu/package-lock.json
+
+      - name: Install client and test dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install SFU dependencies
+        working-directory: sfu
+        run: npm ci --no-audit --no-fund
+
+      - name: Run SFU integration tests
+        run: npm run test:sfu-integration
