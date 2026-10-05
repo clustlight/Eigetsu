@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createRequire } from 'node:module';
+import type { types as Media } from '../sfu/node_modules/mediasoup/node/lib/index.d.ts';
 import { Federation } from '../sfu/federation.ts';
+import type { ClusterClient } from '../sfu/cluster-client.ts';
+import type { PipeCommand, RoomSnapshot, Site } from '../sfu/cluster-types.ts';
+import type { Producer, Room } from '../sfu/types.ts';
 
 const require = createRequire(new URL('../sfu/package.json', import.meta.url));
 const mediasoup = require('mediasoup');
@@ -10,11 +14,11 @@ test(
   'an expired inter-site pipe can recover on the same SFUs without changing the logical producer',
   { timeout: 10000 },
   async (t) => {
-    const workers = [];
+    const workers: Media.Worker[] = [];
     t.after(() => workers.forEach((worker) => worker.close()));
     for (const rtcMinPort of [44000, 44200])
       workers.push(await mediasoup.createWorker({ rtcMinPort, rtcMaxPort: rtcMinPort + 100 }));
-    const codecs = [{ kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 }];
+    const codecs = [{ kind: 'audio' as const, mimeType: 'audio/opus', clockRate: 48000, channels: 2 }];
     const [originRouter, targetRouter] = await Promise.all(
       workers.map((worker) => worker.createRouter({ mediaCodecs: codecs })),
     );
@@ -27,7 +31,7 @@ test(
         rtcp: { cname: 'pipe-recovery-test' },
       },
     });
-    const localRoom = (router, id, producers) => ({
+    const localRoom = (router: Media.Router, id: string, producers: Map<string, Producer>): Room => ({
       id: 'ROOM01',
       name: 'Pipe recovery',
       router,
@@ -39,7 +43,7 @@ test(
     });
     const originRoom = localRoom(originRouter, 'sender', new Map([[source.id, source]]));
     const targetRoom = localRoom(targetRouter, 'viewer', new Map());
-    const snapshot = {
+    const snapshot: RoomSnapshot = {
       id: 'ROOM01',
       name: 'Pipe recovery',
       emptySince: null,
@@ -53,18 +57,23 @@ test(
         { id: 'viewer', name: 'viewer', siteId: 'b', shares: [] },
       ],
     };
-    const controls = new Map();
-    const control = (id) => {
+    const controls = new Map<string, { onOperation: (from: Site, command: PipeCommand) => Promise<unknown> }>();
+    const control = (id: string) => {
       const value = {
-        site: { id, url: '', pipeAddress: '127.0.0.1', instanceId: id },
-        rooms: new Map([['ROOM01', snapshot]]),
+        site: { id, url: '', pipeAddress: '127.0.0.1', instanceId: id } satisfies Site,
+        rooms: new Map<string, RoomSnapshot>([['ROOM01', snapshot]]),
         ready: true,
-        async relay(target, command) {
-          return controls.get(target).onOperation(value.site, command);
+        onOperation: async () => {
+          throw new Error('Operation handler has not been attached');
+        },
+        async relay(target: string, command: PipeCommand) {
+          const remote = controls.get(target);
+          if (!remote) throw new Error(`Unknown site: ${target}`);
+          return remote.onOperation(value.site, command);
         },
       };
       controls.set(id, value);
-      return value;
+      return value as unknown as ClusterClient;
     };
     const a = control('a'),
       b = control('b');
@@ -82,9 +91,9 @@ test(
         throw new Error('Not local');
       },
     });
-    let originPipe;
+    let originPipe: Media.PipeTransport | undefined;
     originRouter.observer.on('newtransport', (transport) => {
-      originPipe = transport;
+      originPipe = transport as Media.PipeTransport;
     });
     const receiver = await targetRouter.createWebRtcTransport({ listenInfos: [{ protocol: 'udp', ip: '127.0.0.1' }] });
     const subscribe = async () => {
@@ -101,6 +110,7 @@ test(
     const retry = new Promise((resolve) => {
       destination.onRetry = (roomId, producerId) => resolve({ roomId, producerId });
     });
+    assert.ok(originPipe);
     originPipe.close();
     assert.deepEqual(await retry, { roomId: 'ROOM01', producerId: source.id });
     assert.ok(first.closed, 'The failed local consumer must be released before retry');

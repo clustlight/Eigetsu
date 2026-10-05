@@ -1,9 +1,21 @@
 import type { QualityPreset } from './quality-presets.ts';
 import type { AudioGain, CreateSendTransport, ShareAppData, Transport } from './types.ts';
 
-interface ScreenCaptureOptions extends DisplayMediaStreamOptions {
+interface ScreenCaptureOptions {
   systemAudio: 'include';
-  audio: MediaTrackConstraints & { suppressLocalAudioPlayback: boolean };
+  video: {
+    width: { ideal: number; max?: number };
+    height: { ideal: number; max?: number };
+    frameRate: { ideal: number; max: number };
+  };
+  audio: {
+    echoCancellation: false;
+    noiseSuppression: false;
+    autoGainControl: false;
+    channelCount: { ideal: number };
+    sampleRate: { ideal: number };
+    suppressLocalAudioPlayback: false;
+  };
 }
 
 export function screenShareCaptureOptions(preset: QualityPreset): ScreenCaptureOptions {

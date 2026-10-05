@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { produceScreenShareAudio, screenShareCaptureOptions, setSharedAudioGain } from '../src/screen-share-audio.ts';
 import { qualityPresets } from '../src/quality-presets.ts';
+import type { AudioGain, CreateSendTransport } from '../src/types.ts';
 
 test('every screen preset disables voice processing without changing video quality', () => {
   for (const preset of qualityPresets) {
@@ -20,10 +21,12 @@ test('every screen preset disables voice processing without changing video quali
 });
 
 test('sender volume changes stay muted and unmuting restores the selected level', () => {
-  const values = [];
-  const audioGain = {
-    context: { currentTime: 12 },
-    gain: { setTargetAtTime: (...args) => values.push(args) },
+  const values: Array<[value: number, time: number, smoothing: number]> = [];
+  const audioGain: AudioGain = {
+    context: { currentTime: 12 } as unknown as AudioGain['context'],
+    gain: {
+      setTargetAtTime: (value: number, time: number, smoothing: number) => values.push([value, time, smoothing]),
+    },
   };
   setSharedAudioGain(audioGain, 0.5);
   setSharedAudioGain(audioGain, 0.5, true);
@@ -52,17 +55,18 @@ test('audio negotiation failures release the generated track, context and transp
     createGain: () => ({ gain: { value: 0 } }),
     createMediaStreamDestination: () => ({ stream: { getAudioTracks: () => [output] } }),
   };
-  for (const [name, implementation] of Object.entries({
+  const implementations: Record<string, unknown> = {
     AudioContext: function () {
       return context;
     },
     MediaStream: function () {},
-  })) {
+  };
+  for (const [name, implementation] of Object.entries(implementations)) {
     const original = Object.getOwnPropertyDescriptor(globalThis, name);
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: implementation });
     t.after(() => {
       if (original) Object.defineProperty(globalThis, name, original);
-      else delete globalThis[name];
+      else Reflect.deleteProperty(globalThis, name);
     });
   }
   const failure = new Error('negotiation failed');
@@ -72,8 +76,10 @@ test('audio negotiation failures release the generated track, context and transp
     },
     close: t.mock.fn(),
   };
+  const createTransport: CreateSendTransport = async () =>
+    transport as unknown as Awaited<ReturnType<CreateSendTransport>>;
   await assert.rejects(
-    produceScreenShareAudio(async () => transport, {}, {}),
+    produceScreenShareAudio(createTransport, {} as MediaStreamTrack, {}),
     (error) => error === failure,
   );
   assert.equal(output.stop.mock.callCount(), 1);

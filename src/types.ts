@@ -17,7 +17,7 @@ export type Consumer = Media.Consumer<ShareAppData>;
 export type Transport = Media.Transport<ShareAppData>;
 export type CreateSendTransport = () => Promise<Transport>;
 export interface AudioGain {
-  gain: AudioParam;
+  gain: { setTargetAtTime(value: number, startTime: number, timeConstant: number): unknown };
   context: AudioContext;
 }
 

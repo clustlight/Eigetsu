@@ -10,6 +10,7 @@ export interface MediaStatsSample {
   remoteId?: string;
   transportId?: string;
   selectedCandidatePairId?: string;
+  nominated?: boolean;
   localCandidateId?: string;
   remoteCandidateId?: string;
   mimeType?: string;

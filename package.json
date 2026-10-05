@@ -12,7 +12,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit && npm --prefix sfu run typecheck && npm --prefix api exec -- tsc --noEmit",
+    "typecheck": "tsc --noEmit && npm --prefix sfu run typecheck && npm --prefix api exec -- tsc --noEmit && tsc --project tests/tsconfig.json",
     "build": "tsc --noEmit && vite build",
     "test": "node --test tests/*.test.ts",
     "test:bitrate": "node tests/bitrate-browser.ts",
