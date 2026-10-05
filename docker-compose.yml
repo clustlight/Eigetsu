@@ -1,6 +1,6 @@
 services:
   web:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER to the lowercase GitHub owner}/eigetsu-web:${IMAGE_TAG:-latest}
+    image: ghcr.io/clustlight/eigetsu-web:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.web
@@ -19,7 +19,7 @@ services:
       - api
 
   api:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER to the lowercase GitHub owner}/eigetsu-api:${IMAGE_TAG:-latest}
+    image: ghcr.io/clustlight/eigetsu-api:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.api
@@ -32,7 +32,7 @@ services:
       - sfu
 
   sfu:
-    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER to the lowercase GitHub owner}/eigetsu-sfu:${IMAGE_TAG:-latest}
+    image: ghcr.io/clustlight/eigetsu-sfu:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.sfu
@@ -40,11 +40,22 @@ services:
     environment:
       NODE_ENV: production
       PORT: '3000'
+      ROLE: ${ROLE:-standalone}
+      SITE_ID: ${SITE_ID:-local}
+      SFU_PUBLIC_URL: ${SFU_PUBLIC_URL:-}
+      MASTER_URL: ${MASTER_URL:-}
+      CLUSTER_SECRET: ${CLUSTER_SECRET:-}
+      MASTER_STATE_FILE: /app/sfu/data/rooms.json
+      PIPE_LISTEN_IP: 0.0.0.0
+      PIPE_ANNOUNCED_IP: ${PIPE_ANNOUNCED_IP:-127.0.0.1}
+      MEDIASOUP_WORKERS: ${MEDIASOUP_WORKERS:-1}
       RTC_MIN_PORT: ${RTC_MIN_PORT:-40000}
       RTC_MAX_PORT: ${RTC_MAX_PORT:-40100}
       MEDIASOUP_ANNOUNCED_IP: ${MEDIASOUP_ANNOUNCED_IP:-127.0.0.1}
     expose:
       - '3000'
+    volumes:
+      - sfu_data:/app/sfu/data
     ports:
       - '${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}:${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}/udp'
       - '${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}:${RTC_MIN_PORT:-40000}-${RTC_MAX_PORT:-40100}/tcp'
@@ -52,3 +63,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  sfu_data:

@@ -34,6 +34,7 @@ export interface Room {
 }
 type Ack = (value: { ok: boolean; error?: string; [key: string]: unknown }) => void;
 export interface ClientEvents {
+  'connection:ping': (reply: (value: { ready: boolean }) => void) => void;
   'room:create': (data: { name: string }, reply: Ack) => void;
   'room:join': (data: { roomId: string; name: string }, reply: Ack) => void;
   'room:sync': (reply: Ack) => void;
@@ -54,7 +55,7 @@ export interface ClientEvents {
   'producer:close': (data: { producerId: string }) => void;
 }
 
-interface PeerInfo {
+export interface PeerInfo {
   id: string;
   name: string;
   shares: { id: string; kind: Media.MediaKind; profile?: string; label: string; appData: ShareAppData }[];

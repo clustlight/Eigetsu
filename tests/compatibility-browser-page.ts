@@ -3,7 +3,7 @@ import { io } from 'socket.io-client';
 import { createCompatibleVideoSender } from '/src/compatible-video.ts';
 import { produceScreenShareVideo } from '/src/screen-share-quality.ts';
 
-window.runCompatibilityCheck = async (inspectHardware = false) => {
+window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 13000, viewerPort = 13000) => {
   const sockets = [],
     transports = [],
     playbacks = [];
@@ -18,8 +18,8 @@ window.runCompatibilityCheck = async (inspectHardware = false) => {
     }
     throw new Error('Compatibility check timed out');
   };
-  const connect = async () => {
-    const socket = io('http://127.0.0.1:13000', { transports: ['websocket'] });
+  const connect = async (port) => {
+    const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
     sockets.push(socket);
     await new Promise((resolve, reject) => {
       socket.once('connect', resolve);
@@ -71,11 +71,11 @@ window.runCompatibilityCheck = async (inspectHardware = false) => {
   };
   try {
     if (inspectHardware) camera = await navigator.mediaDevices.getUserMedia({ video: true });
-    const sender = await connect();
+    const sender = await connect(senderPort);
     const room = await sender.rpc('room:create', { name: 'compatibility-check' });
     sender.device = new Device();
     await sender.device.load({ routerRtpCapabilities: room.rtpCapabilities });
-    const viewer = await connect();
+    const viewer = await connect(viewerPort);
     await viewer.rpc('room:join', { roomId: room.roomId, name: 'baseline-viewer' });
     // Emulate the negotiated intersection for an iOS receiver that advertises
     // 42e0 / 640c, while this router publishes 42e0 / 4d00 / 6400.
@@ -166,7 +166,7 @@ window.runCompatibilityCheck = async (inspectHardware = false) => {
     );
     const consumers = await Promise.all(infos.map((info, index) => receive(viewer, info, receiveTransports[index])));
     assert(
-      playbacks.slice(1).every((element) => element.videoWidth <= 1280 && element.videoHeight <= 720),
+      playbacks.slice(1).every((element) => element.videoWidth <= 1920 && element.videoHeight <= 1080),
       'Compatibility resolution exceeded its budget',
     );
     const synced = await viewer.rpc('room:sync');

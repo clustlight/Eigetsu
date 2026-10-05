@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -14,6 +14,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const audioOnly = process.argv.includes('--audio');
 const controlsOnly = process.argv.includes('--controls');
 const compatibilityOnly = process.argv.includes('--compatibility');
+const clusterOnly = process.argv.includes('--cluster');
 const inspectGpu = process.argv.includes('--gpu');
 const gpuProfile = process.argv.find((arg) => arg.startsWith('--gpu-profile='))?.split('=')[1];
 assert.ok(
@@ -34,6 +35,33 @@ assert.ok(browserPath, 'Set BROWSER_BIN to an installed Chromium browser executa
 const profile = await mkdtemp(path.join(os.tmpdir(), 'eigetsu-bitrate-'));
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let sfu, vite, chrome, ws;
+const edgeProcesses = [];
+const clusterSecret = 'local-cluster-test-secret-at-least-32-characters';
+const masterEnv = {
+  ...process.env,
+  PORT: '13000',
+  RTC_MIN_PORT: '41000',
+  RTC_MAX_PORT: '41100',
+  MEDIASOUP_ANNOUNCED_IP: '127.0.0.1',
+  MEDIASOUP_LISTEN_IP: '127.0.0.1',
+  MEDIASOUP_WORKERS: '1',
+  PIPE_LISTEN_IP: '127.0.0.1',
+  PIPE_ANNOUNCED_IP: '127.0.0.1',
+  SFU_PUBLIC_URL: '',
+  SITE_ID: 'local',
+  CLUSTER_SECRET: clusterSecret,
+  ...(clusterOnly
+    ? {
+        ROLE: 'master',
+        SITE_ID: 'a',
+        SFU_PUBLIC_URL: 'http://127.0.0.1:13000',
+        CLUSTER_SECRET: clusterSecret,
+        PIPE_ANNOUNCED_IP: '127.0.0.1',
+        MASTER_STATE_FILE: path.join(profile, 'master-rooms.json'),
+      }
+    : { ROLE: 'standalone', MASTER_STATE_FILE: '' }),
+};
+const edgeEnvs = [];
 let browserErrors = '';
 
 async function waitFor(url, select = (value) => value) {
@@ -57,16 +85,43 @@ try {
     cwd: root,
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'pipe'],
-    env: {
-      ...process.env,
-      PORT: '13000',
-      RTC_MIN_PORT: '41000',
-      RTC_MAX_PORT: '41100',
-      MEDIASOUP_ANNOUNCED_IP: '127.0.0.1',
-    },
+    env: masterEnv,
   });
   sfu.stderr.on('data', (chunk) => process.stderr.write(chunk));
   await waitFor('http://127.0.0.1:13000/health');
+  if (clusterOnly) {
+    for (const [siteId, port, minPort] of [
+      ['b', 13010, 41200],
+      ['c', 13020, 41400],
+    ]) {
+      const env = {
+        ...process.env,
+        ROLE: 'sfu',
+        SITE_ID: siteId,
+        PORT: String(port),
+        SFU_PUBLIC_URL: `http://127.0.0.1:${port}`,
+        MASTER_URL: 'http://127.0.0.1:13000',
+        CLUSTER_SECRET: clusterSecret,
+        PIPE_ANNOUNCED_IP: '127.0.0.1',
+        RTC_MIN_PORT: String(minPort),
+        RTC_MAX_PORT: String(minPort + 100),
+        MEDIASOUP_ANNOUNCED_IP: '127.0.0.1',
+        MEDIASOUP_LISTEN_IP: '127.0.0.1',
+        MEDIASOUP_WORKERS: '1',
+        PIPE_LISTEN_IP: '127.0.0.1',
+      };
+      edgeEnvs.push(env);
+      const edge = spawn(process.execPath, ['sfu/index.ts'], {
+        cwd: root,
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env,
+      });
+      edgeProcesses.push(edge);
+      edge.stderr.on('data', (chunk) => process.stderr.write(chunk));
+      await waitFor(`http://127.0.0.1:${port}/health`);
+    }
+  }
   vite = await createServer({
     root,
     configFile: false,
@@ -76,7 +131,23 @@ try {
       host: '127.0.0.1',
       port: 15173,
       strictPort: true,
-      proxy: { '/socket.io': { target: 'http://127.0.0.1:13000', ws: true } },
+      proxy: {
+        '/socket.io': { target: 'http://127.0.0.1:13000', ws: true },
+        '/sfu': { target: 'http://127.0.0.1:13000' },
+        '/api/rooms': { target: 'http://127.0.0.1:13000', rewrite: () => '/internal/rooms' },
+        '/__cluster/a': {
+          target: 'http://127.0.0.1:13000',
+          rewrite: (value) => value.replace('/__cluster/a', '/internal'),
+        },
+        '/__cluster/b': {
+          target: 'http://127.0.0.1:13010',
+          rewrite: (value) => value.replace('/__cluster/b', '/internal'),
+        },
+        '/__cluster/c': {
+          target: 'http://127.0.0.1:13020',
+          rewrite: (value) => value.replace('/__cluster/c', '/internal'),
+        },
+      },
     },
   });
   await vite.listen();
@@ -171,8 +242,9 @@ try {
     if (i === 49) throw new Error('Browser test fixture failed to load');
     await delay(200);
   }
-  if (audioOnly) {
-    const result = await evaluate('window.runAudioCheck()');
+  if (clusterOnly) console.log('Cluster:', JSON.stringify(await evaluate('window.runClusterCheck()')));
+  if (audioOnly || clusterOnly) {
+    const result = await evaluate(clusterOnly ? 'window.runAudioCheck(13010, 13000)' : 'window.runAudioCheck()');
     const mean = (samples) =>
       [0, 1].map((channel) => samples.reduce((sum, sample) => sum + sample[channel], 0) / samples.length);
     const full = mean(result.full);
@@ -230,13 +302,196 @@ try {
       `audio: stable stereo RMS ${full.map((value) => value.toFixed(4)).join(', ')}; 50%/25% gain and mute passed`,
     );
   }
-  if (compatibilityOnly) {
+  if (compatibilityOnly || clusterOnly) {
     console.log(
       'Profile compatibility:',
-      JSON.stringify(await evaluate(`window.runCompatibilityCheck(${inspectGpu})`)),
+      JSON.stringify(
+        await evaluate(`window.runCompatibilityCheck(${inspectGpu}${clusterOnly ? ', 13010, 13000' : ''})`),
+      ),
     );
   }
-  for (const [mode, presetId] of audioOnly || controlsOnly || compatibilityOnly
+  if (clusterOnly) {
+    const recoveryRoom = await evaluate('window.runClusterCheck(true)');
+    const before = await evaluate('window.clusterRecovery.frames()');
+    let exited = once(sfu, 'exit');
+    sfu.kill();
+    await exited;
+    await delay(1500);
+    const during = await evaluate('window.clusterRecovery.frames()');
+    assert.ok(during > before, 'Edge-to-edge video stopped when the master stopped');
+    sfu = spawn(process.execPath, ['sfu/index.ts'], {
+      cwd: root,
+      windowsHide: true,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      env: masterEnv,
+    });
+    sfu.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    await waitFor('http://127.0.0.1:13000/health');
+    await waitFor('http://127.0.0.1:13000/sfu/sites', (sites) => sites.length === 3);
+    await delay(1500);
+    assert.ok(
+      (await evaluate('window.clusterRecovery.frames()')) > during,
+      'Existing media did not survive master recovery',
+    );
+    console.log('Cluster: master restart restored metadata while edge-to-edge video continued');
+
+    const { targetId } = await command('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await command('Target.attachToTarget', { targetId, flatten: true });
+    try {
+      await command('Page.enable', {}, sessionId);
+      await command(
+        'Page.addScriptToEvaluateOnNewDocument',
+        {
+          source: `
+        window.__probes = 0; window.__socketUrls = [];
+        const realFetch = window.fetch;
+        window.fetch = async (...args) => {
+          const url = String(args[0]);
+          if (url.includes('/sfu/ping')) {
+            window.__probes++;
+            await new Promise(resolve => setTimeout(resolve, url.includes(':13010/') ? 0 : 100));
+          }
+          return realFetch(...args);
+        };
+        const RealWebSocket = window.WebSocket;
+        window.WebSocket = class extends RealWebSocket {
+          constructor(...args) {
+            super(...args);
+            if (String(args[0]).includes('/socket.io/')) window.__socketUrls.push(String(args[0]));
+          }
+        };
+      `,
+        },
+        sessionId,
+      );
+      await command('Page.navigate', { url: `http://127.0.0.1:15173/?room=${recoveryRoom.roomId}` }, sessionId);
+      const waitPage = async (expression) => {
+        for (let i = 0; i < 100; i++) {
+          if (await evaluate(expression, sessionId)) return;
+          await delay(100);
+        }
+        throw new Error(`Application condition timed out: ${expression}`);
+      };
+      await waitPage(
+        "window.__socketUrls.some(url => url.includes(':13010/')) && Boolean(document.querySelector('.room-header'))",
+      );
+      await waitPage("document.querySelector('.stream-card video')?.videoWidth > 0");
+      const probes = await evaluate('window.__probes', sessionId);
+      const applicationRoom = await evaluate("document.querySelector('.room-code').textContent", sessionId);
+      assert.equal(probes, 12, 'Expected warmup and three RTT samples at each site');
+      await waitPage(
+        "document.querySelector('.sfu-connection')?.textContent.includes('接続先SFU：b') && document.querySelector('.transport-list')?.textContent.includes('UDP')",
+      );
+      assert.equal(await evaluate("document.querySelector('.sfu-connection a')?.target", sessionId), '_blank');
+      await mkdir(path.join(root, 'tmp'), { recursive: true });
+      const roomScreenshot = await command('Page.captureScreenshot', { captureBeyondViewport: true }, sessionId);
+      await writeFile(path.join(root, 'tmp/sfu-connection.png'), Buffer.from(roomScreenshot.data, 'base64'));
+      const statistics = await (await fetch('http://127.0.0.1:13010/sfu/statistics')).json();
+      assert.equal(statistics.sites.length, 3);
+      assert.ok(statistics.sites.every((site) => site.status === 'online' && site.metrics.workers.length === 1));
+      assert.ok(statistics.sites.find((site) => site.id === 'b').metrics.clients.bytesSent > 0);
+      assert.ok(statistics.sites.find((site) => site.id === 'c').metrics.pipes.bytesSent > 0);
+      const dashboard = await command('Target.createTarget', { url: 'http://127.0.0.1:15173/cluster' });
+      try {
+        const { sessionId: dashboardSession } = await command('Target.attachToTarget', {
+          targetId: dashboard.targetId,
+          flatten: true,
+        });
+        for (let i = 0; i < 100; i++) {
+          if (await evaluate("document.querySelectorAll('.sfu-card').length === 3", dashboardSession)) break;
+          await delay(100);
+        }
+        assert.equal(await evaluate("document.querySelectorAll('.sfu-card').length", dashboardSession), 3);
+        await mkdir(path.join(root, 'tmp'), { recursive: true });
+        await command('Page.enable', {}, dashboardSession);
+        await command(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false },
+          dashboardSession,
+        );
+        await command(
+          'Emulation.setEmulatedMedia',
+          { features: [{ name: 'prefers-color-scheme', value: 'light' }] },
+          dashboardSession,
+        );
+        const screenshot = await command('Page.captureScreenshot', { captureBeyondViewport: true }, dashboardSession);
+        await writeFile(path.join(root, 'tmp/cluster-statistics.png'), Buffer.from(screenshot.data, 'base64'));
+        await command(
+          'Emulation.setEmulatedMedia',
+          { features: [{ name: 'prefers-color-scheme', value: 'dark' }] },
+          dashboardSession,
+        );
+        const darkScreenshot = await command(
+          'Page.captureScreenshot',
+          { captureBeyondViewport: true },
+          dashboardSession,
+        );
+        await writeFile(path.join(root, 'tmp/cluster-statistics-dark.png'), Buffer.from(darkScreenshot.data, 'base64'));
+        await command(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 390, height: 844, deviceScaleFactor: 1, mobile: true },
+          dashboardSession,
+        );
+        assert.ok(
+          await evaluate('document.documentElement.scrollWidth <= innerWidth', dashboardSession),
+          'Statistics page overflows on mobile',
+        );
+        const mobileScreenshot = await command(
+          'Page.captureScreenshot',
+          { captureBeyondViewport: true },
+          dashboardSession,
+        );
+        await writeFile(
+          path.join(root, 'tmp/cluster-statistics-mobile.png'),
+          Buffer.from(mobileScreenshot.data, 'base64'),
+        );
+        await evaluate("window.fetch = async () => { throw new Error('simulated outage'); }", dashboardSession);
+        await delay(6000);
+        assert.ok(
+          await evaluate(
+            "Boolean(document.querySelector('[role=alert]')) && document.querySelectorAll('.sfu-card').length === 3",
+            dashboardSession,
+          ),
+          'Failed refresh should preserve and label stale statistics',
+        );
+        console.log('Cluster: statistics page shows all SFUs, live traffic, responsive layout and stale-data warning');
+      } finally {
+        await command('Target.closeTarget', { targetId: dashboard.targetId });
+      }
+      exited = once(edgeProcesses[0], 'exit');
+      edgeProcesses[0].kill();
+      await exited;
+      await delay(2500);
+      const restarted = spawn(process.execPath, ['sfu/index.ts'], {
+        cwd: root,
+        windowsHide: true,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: edgeEnvs[0],
+      });
+      edgeProcesses[0] = restarted;
+      restarted.stderr.on('data', (chunk) => process.stderr.write(chunk));
+      await waitFor('http://127.0.0.1:13010/health');
+      await waitFor('http://127.0.0.1:13000/internal/rooms', (rooms) =>
+        rooms.some((room) => room.id === applicationRoom && room.peopleCount === 2),
+      );
+      await waitPage(
+        "window.__socketUrls.length > 1 && Boolean(document.querySelector('.room-header')) && !document.body.textContent.includes('接続が切れました')",
+      );
+      await waitPage("document.querySelector('.stream-card video')?.videoWidth > 0");
+      assert.equal(await evaluate('window.__probes', sessionId), probes, 'Reconnection reran SFU selection');
+      assert.ok(
+        await evaluate("window.__socketUrls.every(url => url.includes(':13010/'))", sessionId),
+        'Client migrated to another SFU',
+      );
+      console.log(
+        'Cluster: application selected lowest RTT, decoded remote video and restored it on the same SFU after restart without probing again',
+      );
+    } finally {
+      await command('Target.closeTarget', { targetId });
+      await evaluate('window.clusterRecovery.cleanup()');
+    }
+  }
+  for (const [mode, presetId] of audioOnly || controlsOnly || compatibilityOnly || clusterOnly
     ? []
     : gpuProfile
       ? [['fixed', '1080p30']]
@@ -334,7 +589,7 @@ try {
     ws.send(JSON.stringify({ id: 99999, method: 'Browser.close' }));
     ws.close();
   }
-  for (const process of [chrome, sfu]) {
+  for (const process of [chrome, ...edgeProcesses, sfu]) {
     if (!process || process.exitCode != null) continue;
     const exited = once(process, 'exit');
     process.kill();

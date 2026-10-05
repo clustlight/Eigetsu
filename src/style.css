@@ -10,6 +10,147 @@
   --teal: #72ead2;
   --panel: #111820;
 }
+.sfu-connection {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 16px;
+  margin: 0 0 16px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.sfu-connection summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.connection-metrics,
+.transport-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  margin-top: 12px;
+}
+.connection-metrics b {
+  font-weight: 500;
+}
+.metric-muted,
+.transport-list {
+  color: var(--muted);
+}
+.metric-online,
+.cluster-page a,
+.cluster-link,
+.sfu-connection a {
+  color: var(--teal);
+}
+.metric-warning {
+  color: #ffbe84;
+}
+.cluster-link {
+  font-size: 13px;
+}
+.shell.cluster-page {
+  max-width: 1400px;
+  padding-top: 32px;
+  padding-bottom: 40px;
+}
+.cluster-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 32px;
+  padding: 20px 0;
+}
+.cluster-summary b {
+  margin-left: 8px;
+  font-size: 22px;
+}
+.cluster-sites {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 20px;
+}
+.sfu-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  padding: 24px;
+  overflow-wrap: anywhere;
+}
+.sfu-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.sfu-card h2 {
+  margin: 0;
+  font-size: 22px;
+}
+.sfu-card h3 {
+  font-size: 14px;
+  margin: 18px 0 12px;
+}
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 16px;
+}
+.metric-grid dt {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.metric-grid dd {
+  margin: 0;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.traffic-stat {
+  border-top: 1px solid var(--line);
+}
+.worker-list {
+  font-size: 13px;
+}
+.statistics-notes {
+  line-height: 1.8;
+  font-size: 12px;
+  margin-top: 28px;
+}
+.popout-connection {
+  position: absolute;
+  bottom: 12px;
+  left: 16px;
+  right: 16px;
+  z-index: 12;
+  opacity: 0;
+  pointer-events: none;
+}
+.focus-window.controls-visible .popout-connection,
+.popout-connection:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (prefers-color-scheme: light) {
+  .sfu-connection,
+  .cluster-page {
+    --panel: #fff;
+    --line: #dce3e7;
+    --muted: #5d707b;
+    --teal: #146b5e;
+    color: #1e292e;
+  }
+  .cluster-link {
+    color: #146b5e;
+  }
+  .cluster-page .metric-warning {
+    color: #91500b;
+  }
+}
+@media (max-width: 700px) {
+  .shell.cluster-page {
+    padding: 24px 20px;
+  }
+}
 * {
   box-sizing: border-box;
 }

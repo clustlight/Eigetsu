@@ -4,6 +4,14 @@ import express from 'express';
 import http from 'node:http';
 import { Server } from 'socket.io';
 import * as mediasoup from 'mediasoup';
+import { readClusterConfig } from './cluster-config.ts';
+import { ClusterClient } from './cluster-client.ts';
+import { Coordinator } from './coordinator.ts';
+import { Federation, type ProducerLease } from './federation.ts';
+import type { RoomSnapshot } from './cluster-types.js';
+import { createStatisticsCollector } from './statistics.ts';
+
+const config = readClusterConfig();
 
 const app = express();
 const server = http.createServer(app);
@@ -11,24 +19,96 @@ const io = new Server<ClientEvents, ServerEvents>(server, {
   cors: { origin: true, credentials: true },
   maxHttpBufferSize: 1e6,
 });
-app.get('/health', (_req, res) => res.json({ status: 'ok', rooms: rooms.size }));
-app.get('/internal/rooms', (_req, res) => {
-  const now = Date.now();
-  res.set('Cache-Control', 'no-store');
-  res.json(
-    [...rooms.values()].map((room) => ({
+const rooms = new Map<string, Room>();
+const pendingRooms = new Map<string, Promise<Room>>();
+const roomSnapshots = new Map<string, RoomSnapshot>();
+const ROOM_RETENTION_MS = 5 * 60 * 1000;
+if (config.role !== 'sfu') new Coordinator(io, config.secret, config.stateFile, config.siteGraceMs);
+const cluster = new ClusterClient(config.masterUrl, config.secret, config.site, () =>
+  [...rooms.values()]
+    .filter((room) => room.peers.size)
+    .map((room) => ({
       id: room.id,
       name: room.name,
-      peopleCount: room.peers.size,
-      expiresAt: room.emptySince ? room.emptySince + ROOM_RETENTION_MS : null,
-      remainingMs: room.emptySince ? Math.max(0, room.emptySince + ROOM_RETENTION_MS - now) : null,
+      peers: [...room.peers.values()].map(peerInfo),
     })),
-  );
+);
+const federation = new Federation({ cluster, rooms, listenIp: config.pipeListenIp, resolveLocal: consumableProducer });
+federation.onRetry = (roomId, producerId) => {
+  const peer = cluster.rooms.get(roomId)?.peers.find((peer) => peer.shares.some((share) => share.id === producerId));
+  const share = peer?.shares.find((share) => share.id === producerId);
+  if (peer && share) io.to(roomId).emit('producer:new', { ...share, producerId, peerId: peer.id, peerName: peer.name });
+};
+cluster.onRoom = (snapshot) => {
+  const previous = roomSnapshots.get(snapshot.id);
+  roomSnapshots.set(snapshot.id, snapshot);
+  const local = rooms.get(snapshot.id);
+  if (local) local.name = snapshot.name;
+  for (const peer of previous?.peers || []) {
+    const next = snapshot.peers.find((item) => item.id === peer.id);
+    if (!next) io.to(snapshot.id).except(peer.id).emit('peer:left', { peerId: peer.id });
+    for (const share of peer.shares) {
+      if (!next?.shares.some((item) => item.id === share.id))
+        io.to(snapshot.id).except(peer.id).emit('producer:closed', { producerId: share.id, peerId: peer.id });
+    }
+  }
+  for (const peer of snapshot.peers) {
+    const old = previous?.peers.find((item) => item.id === peer.id);
+    if (!old) io.to(snapshot.id).except(peer.id).emit('peer:joined', peer);
+    for (const share of peer.shares) {
+      if (!old?.shares.some((item) => item.id === share.id))
+        io.to(snapshot.id)
+          .except(peer.id)
+          .emit('producer:new', {
+            producerId: share.id,
+            peerId: peer.id,
+            peerName: peer.name,
+            ...share,
+          });
+    }
+  }
+  federation.reconcile(snapshot.id, new Set(snapshot.peers.flatMap((peer) => peer.shares.map((share) => share.id))));
+  if (!snapshot.peers.some((peer) => peer.siteId === config.site.id)) roomSnapshots.delete(snapshot.id);
+};
+app.get('/health', (_req, res) =>
+  res
+    .status(cluster.ready ? 200 : 503)
+    .json({ status: cluster.ready ? 'ok' : 'waiting-for-master', siteId: config.site.id, rooms: rooms.size }),
+);
+app.use('/sfu', (_req, res, next) => {
+  res.set({ 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+  next();
 });
-
-const rooms = new Map<string, Room>();
-const ROOM_RETENTION_MS = 5 * 60 * 1000;
+app.get('/sfu/ping', (_req, res) => res.status(cluster.ready ? 200 : 503).json({ siteId: config.site.id }));
+app.get('/sfu/sites', async (_req, res) => {
+  try {
+    res.json(await cluster.request({ action: 'sites' }));
+  } catch {
+    res.status(503).json({ error: 'ルーム管理サーバーに接続できません' });
+  }
+});
+app.get('/internal/rooms', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    res.json(await cluster.request({ action: 'rooms' }));
+  } catch {
+    res.status(503).json({ error: 'Master unavailable' });
+  }
+});
+app.get('/internal/cluster', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ siteId: config.site.id, ready: cluster.ready, ...(await federation.diagnostics()) });
+});
 const workers: mediasoup.types.Worker[] = [];
+const clientTransports = new Set<mediasoup.types.WebRtcTransport>();
+cluster.onStatistics = createStatisticsCollector(config.role, rooms, workers, clientTransports, federation);
+app.get('/sfu/statistics', async (_req, res) => {
+  try {
+    res.json(await cluster.request({ action: 'statistics' }));
+  } catch {
+    res.status(503).json({ error: 'クラスタの統計を取得できません。マスターへの接続を確認してください。' });
+  }
+});
 let nextWorker = 0;
 const mediaCodecs: mediasoup.types.RouterRtpCodecCapability[] = [
   { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
@@ -74,26 +154,46 @@ function pickWorker() {
 }
 
 async function getRoom(roomId: string, roomName?: string) {
-  let room = rooms.get(roomId);
+  const room = rooms.get(roomId);
   if (room) {
     if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
     room.cleanupTimer = null;
     room.emptySince = null;
     return room;
   }
-  const router = await pickWorker().createRouter({ mediaCodecs });
-  room = {
-    id: roomId,
-    name: roomName || '配信ルーム',
-    router,
-    peers: new Map(),
-    compatibilityRequests: new Map(),
-    compatibilityStreams: new Map(),
-    cleanupTimer: null,
-    emptySince: null,
-  };
-  rooms.set(roomId, room);
-  return room;
+  const pending = pendingRooms.get(roomId);
+  if (pending) return pending;
+  const creating = (async () => {
+    const router = await pickWorker().createRouter({ mediaCodecs });
+    const created: Room = {
+      id: roomId,
+      name: roomName || '配信ルーム',
+      router,
+      peers: new Map(),
+      compatibilityRequests: new Map(),
+      compatibilityStreams: new Map(),
+      cleanupTimer: null,
+      emptySince: null,
+    };
+    rooms.set(roomId, created);
+    retainEmptyRoom(created);
+    return created;
+  })().finally(() => pendingRooms.delete(roomId));
+  pendingRooms.set(roomId, creating);
+  return creating;
+}
+
+function retainEmptyRoom(room: Room) {
+  if (room.peers.size) return;
+  if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
+  room.emptySince = Date.now();
+  room.cleanupTimer = setTimeout(() => {
+    if (room.peers.size || rooms.get(room.id) !== room) return;
+    room.router.close();
+    rooms.delete(room.id);
+    roomSnapshots.delete(room.id);
+  }, ROOM_RETENTION_MS);
+  room.cleanupTimer.unref();
 }
 
 function peerInfo(peer: Peer) {
@@ -151,23 +251,31 @@ async function consumableProducer(room: Room, producerId: string, rtpCapabilitie
 }
 
 io.on('connection', (socket) => {
+  socket.on('connection:ping', (reply) => {
+    if (typeof reply === 'function') reply({ ready: cluster.ready });
+  });
   let room: Room | undefined;
   let peer: Peer | undefined;
+  let joining = false;
   const transports = new Map<string, mediasoup.types.WebRtcTransport>();
   const producers = new Map<string, Producer>();
   const consumers = new Map<string, mediasoup.types.Consumer>();
+  const consumerSetupTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const acknowledgeConsumer = (id: string) => {
+    clearTimeout(consumerSetupTimers.get(id));
+    consumerSetupTimers.delete(id);
+  };
   const reply = (callback: unknown, value: Record<string, unknown>) => {
     if (typeof callback === 'function') callback(value);
   };
 
   socket.on('room:create', async ({ name }, callback) => {
-    const id = Math.random().toString(36).slice(2, 8).toUpperCase();
     const creatorName = String(name || 'ゲスト').slice(0, 40);
     try {
-      const joinedRoom = await joinRoom(id, creatorName, `${creatorName}の部屋`);
+      const joinedRoom = await joinRoom(undefined, creatorName);
       reply(callback, {
         ok: true,
-        roomId: id,
+        roomId: joinedRoom.id,
         roomName: joinedRoom.name,
         rtpCapabilities: joinedRoom.router.rtpCapabilities,
         peers: [],
@@ -189,7 +297,7 @@ io.on('connection', (socket) => {
         roomId: id,
         roomName: joinedRoom.name,
         rtpCapabilities: joinedRoom.router.rtpCapabilities,
-        peers: [...joinedRoom.peers.values()].filter((p) => p.id !== socket.id).map(peerInfo),
+        peers: (cluster.rooms.get(id)?.peers || []).filter((p) => p.id !== socket.id),
       });
     } catch (error) {
       reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -200,18 +308,38 @@ io.on('connection', (socket) => {
     if (!room || !peer) return reply(callback, { ok: false, error: 'Not joined to a room' });
     reply(callback, {
       ok: true,
-      peers: [...room.peers.values()].filter((item) => item.id !== socket.id).map(peerInfo),
+      peers: (cluster.rooms.get(room.id)?.peers || []).filter((item) => item.id !== socket.id),
     });
   });
 
-  async function joinRoom(id: string, name: string, roomName?: string) {
-    if (room) throw new Error('すでにルームに参加しています');
-    room = await getRoom(id, roomName);
-    peer = { id: socket.id, name: String(name).slice(0, 40), producers };
-    room.peers.set(socket.id, peer);
-    socket.join(id);
-    socket.to(id).emit('peer:joined', peerInfo(peer));
-    return room;
+  async function joinRoom(id: string | undefined, name: string) {
+    if (room || joining) throw new Error('すでにルームに参加しています');
+    joining = true;
+    let snapshot: RoomSnapshot | undefined;
+    try {
+      snapshot = await cluster.request<RoomSnapshot>({
+        action: 'join',
+        roomId: id,
+        peerId: socket.id,
+        name: String(name).slice(0, 40),
+      });
+      if (!socket.connected) throw new Error('Participant disconnected');
+      const joined = await getRoom(snapshot.id, snapshot.name);
+      if (!socket.connected) throw new Error('Participant disconnected');
+      room = joined;
+      peer = { id: socket.id, name: String(name).slice(0, 40), producers };
+      room.peers.set(socket.id, peer);
+      if (room.cleanupTimer) clearTimeout(room.cleanupTimer);
+      room.cleanupTimer = null;
+      room.emptySince = null;
+      socket.join(room.id);
+      return room;
+    } catch (error) {
+      if (snapshot) void cluster.request({ action: 'leave', roomId: snapshot.id, peerId: socket.id }).catch(() => {});
+      throw error;
+    } finally {
+      joining = false;
+    }
   }
 
   socket.on('transport:create', async ({ direction }, callback) => {
@@ -232,7 +360,13 @@ io.on('connection', (socket) => {
         initialAvailableOutgoingBitrate: 30_000_000,
         appData: { direction },
       });
+      if (!socket.connected) {
+        transport.close();
+        throw new Error('Participant disconnected');
+      }
       transports.set(transport.id, transport);
+      clientTransports.add(transport);
+      transport.observer.once('close', () => clientTransports.delete(transport));
       console.info(
         `[webrtc] transport=${transport.id} direction=${direction} announcedAddress=${announcedAddress} candidates=${JSON.stringify(transport.iceCandidates.map(({ protocol, address, port }) => ({ protocol, address, port })))}`,
       );
@@ -290,7 +424,7 @@ io.on('connection', (socket) => {
         rtpParameters,
         appData: { ...appData, ownerId: socket.id },
       });
-      if (parent?.closed) {
+      if (parent?.closed || !socket.connected || transport.closed) {
         producer.close();
         throw new Error('共有が終了しています');
       }
@@ -317,19 +451,39 @@ io.on('connection', (socket) => {
           socket.emit('producer:compatibility-stop', { producerId: parent.id });
         } else {
           producerRoom.compatibilityStreams.get(producer.id)?.producer.close();
-          socket.to(producerRoom.id).emit('producer:closed', { producerId: producer.id, peerId: socket.id });
+          void cluster
+            .request({ action: 'unpublish', roomId: producerRoom.id, peerId: socket.id, producerId: producer.id })
+            .catch(() => {});
         }
       });
-      if (!parent)
-        socket.to(room.id).emit('producer:new', {
-          producerId: producer.id,
-          peerId: socket.id,
-          peerName: peer.name,
-          kind,
-          profile: appData?.profile,
-          label: appData?.label || '画面共有',
-          appData: producer.appData,
-        });
+      if (!parent) {
+        try {
+          await cluster.request({
+            action: 'publish',
+            roomId: producerRoom.id,
+            peerId: socket.id,
+            share: {
+              id: producer.id,
+              kind,
+              profile: appData?.profile,
+              label: appData?.label || '画面共有',
+              appData: producer.appData,
+            },
+          });
+          if (producer.closed) {
+            await cluster.request({
+              action: 'unpublish',
+              roomId: producerRoom.id,
+              peerId: socket.id,
+              producerId: producer.id,
+            });
+            throw new Error('共有が終了しています');
+          }
+        } catch (error) {
+          producer.close();
+          throw error;
+        }
+      }
       reply(callback, { ok: true, id: producer.id });
     } catch (error) {
       reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -337,12 +491,26 @@ io.on('connection', (socket) => {
   });
 
   socket.on('consume', async ({ transportId, producerId, rtpCapabilities }, callback) => {
+    let lease: ProducerLease | undefined;
+    let consumer: mediasoup.types.Consumer | undefined;
     try {
       const transport = transports.get(transportId);
       if (!transport || !room) throw new Error('Transport not found');
-      const source = await consumableProducer(room, producerId, rtpCapabilities);
-      const consumer = await transport.consume({ producerId: source.id, rtpCapabilities, paused: true });
+      const local = [...room.peers.values()].some((peer) => peer.producers.has(producerId));
+      if (!local) lease = await federation.acquire(room, producerId, rtpCapabilities);
+      const source = lease?.producer || (await consumableProducer(room, producerId, rtpCapabilities));
+      consumer = await transport.consume({ producerId: source.id, rtpCapabilities, paused: true });
+      const consumed = consumer;
+      if (!socket.connected || transport.closed) throw new Error('Participant disconnected');
+      lease?.attach(consumer);
       consumers.set(consumer.id, consumer);
+      const setupTimer = setTimeout(() => {
+        consumers.delete(consumed.id);
+        consumed.close();
+      }, 30000);
+      setupTimer.unref();
+      consumerSetupTimers.set(consumer.id, setupTimer);
+      consumer.observer.once('close', () => acknowledgeConsumer(consumed.id));
       const compatibility = source.appData.compatibilityFor
         ? room.compatibilityStreams.get(source.appData.compatibilityFor)
         : undefined;
@@ -350,13 +518,13 @@ io.on('connection', (socket) => {
         if (compatibility.timer) clearTimeout(compatibility.timer);
         compatibility.consumers.add(consumer.id);
         consumer.observer.once('close', () => {
-          compatibility.consumers.delete(consumer.id);
+          compatibility.consumers.delete(consumed.id);
           if (!source.closed) compatibility.scheduleClose();
         });
       }
-      consumer.on('transportclose', () => consumers.delete(consumer.id));
+      consumer.on('transportclose', () => consumers.delete(consumed.id));
       consumer.on('producerclose', () => {
-        consumers.delete(consumer.id);
+        consumers.delete(consumed.id);
         socket.emit('producer:closed', { producerId });
       });
       reply(callback, {
@@ -370,7 +538,10 @@ io.on('connection', (socket) => {
         appData: source.appData,
       });
     } catch (error) {
+      consumer?.close();
       reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      lease?.release();
     }
   });
 
@@ -378,7 +549,9 @@ io.on('connection', (socket) => {
     try {
       const consumer = consumers.get(consumerId);
       if (!consumer) throw new Error('Consumer not found');
+      acknowledgeConsumer(consumerId);
       await consumer.resume();
+      await federation.synchronizeConsumer(consumer);
       reply(callback, { ok: true });
     } catch (error) {
       reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -389,7 +562,9 @@ io.on('connection', (socket) => {
     try {
       const consumer = consumers.get(consumerId);
       if (!consumer) throw new Error('Consumer not found');
+      acknowledgeConsumer(consumerId);
       await consumer.pause();
+      await federation.synchronizeConsumer(consumer);
       reply(callback, { ok: true });
     } catch (error) {
       reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -415,23 +590,15 @@ io.on('connection', (socket) => {
     for (const consumer of consumers.values()) consumer.close();
     for (const transport of transports.values()) transport.close();
     if (!room) return;
-    const disconnectedRoom = room;
     room.peers.delete(socket.id);
-    socket.to(room.id).emit('peer:left', { peerId: socket.id });
-    if (room.peers.size === 0) {
-      room.emptySince = Date.now();
-      room.cleanupTimer = setTimeout(() => {
-        if (disconnectedRoom.peers.size !== 0 || rooms.get(disconnectedRoom.id) !== disconnectedRoom) return;
-        disconnectedRoom.router.close();
-        rooms.delete(disconnectedRoom.id);
-        console.log(`Room ${disconnectedRoom.id} expired after five minutes without participants`);
-      }, ROOM_RETENTION_MS);
-      room.cleanupTimer.unref?.();
-    }
+    void cluster.request({ action: 'leave', roomId: room.id, peerId: socket.id }).catch(() => {});
+    retainEmptyRoom(room);
   });
 });
 
 const workerCount = Math.max(1, Number(process.env.MEDIASOUP_WORKERS || 1));
 for (let i = 0; i < workerCount; i++) workers.push(await createWorker());
-const port = Number(process.env.PORT || 3000);
-server.listen(port, '0.0.0.0', () => console.log(`Eigetsu signaling/SFU listening on :${port}`));
+server.listen(config.port, '0.0.0.0', () => {
+  console.log(`Eigetsu signaling/SFU site=${config.site.id} role=${config.role} listening on :${config.port}`);
+  cluster.connect();
+});

@@ -97,6 +97,7 @@ export interface ProducerAnnouncement {
   appData: ShareAppData;
 }
 export interface Connection {
+  transports: Set<Transport>;
   socket: Socket;
   device: Device;
   createSendTransport: CreateSendTransport;

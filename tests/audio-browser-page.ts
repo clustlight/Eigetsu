@@ -5,7 +5,7 @@ import { configureScreenShareReceiver } from '/src/screen-share-receive.ts';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-window.runAudioCheck = async () => {
+window.runAudioCheck = async (senderPort = 13000, viewerPort = 13000) => {
   const sockets = [];
   const transports = [];
   const context = new AudioContext({ sampleRate: 48_000 });
@@ -15,8 +15,8 @@ window.runAudioCheck = async () => {
   let playback;
   try {
     await context.resume();
-    const connect = async () => {
-      const socket = io('http://127.0.0.1:13000', { transports: ['websocket'] });
+    const connect = async (port) => {
+      const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
       sockets.push(socket);
       await new Promise((resolve, reject) => {
         socket.once('connect', resolve);
@@ -31,9 +31,9 @@ window.runAudioCheck = async () => {
         });
       return { socket, rpc };
     };
-    const sender = await connect();
+    const sender = await connect(senderPort);
     const room = await sender.rpc('room:create', { name: 'audio-check' });
-    const receiver = await connect();
+    const receiver = await connect(viewerPort);
     await receiver.rpc('room:join', { roomId: room.roomId, name: 'listener' });
     const sendDevice = new Device();
     const recvDevice = new Device();

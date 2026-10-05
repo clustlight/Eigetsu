@@ -33,12 +33,14 @@ import { produceScreenShareAudio, screenShareCaptureOptions, setSharedAudioGain 
 import { qualityPresets as presets, defaultQualityPreset } from './quality-presets.ts';
 import { usePlayerControls } from './player-controls.ts';
 import { createCompatibleVideoSender } from './compatible-video.ts';
+import { discoverSfu, type SfuSelection } from './sfu-selection.ts';
 import {
   configureScreenShareReceiver,
   readScreenConnectionStats,
   readScreenReceiveStats,
   readVideoPlaybackStats,
 } from './screen-share-receive.ts';
+import { ClusterStatisticsPage, SfuConnectionInfo } from './sfu-monitor.tsx';
 import './style.css';
 
 const params = new URLSearchParams(location.search);
@@ -266,6 +268,21 @@ function StreamQuality({ share }: { share: Share }) {
   );
 }
 
+function disposeMedia(current: Connection, shares: Map<string, Share>) {
+  current.compatibleSender?.close();
+  current.recvTransport.close();
+  for (const share of shares.values()) {
+    share.producer?.close();
+    share.audioProducer?.close();
+    share.videoTransport?.close();
+    share.audioTransport?.close();
+    if (share.audioGain?.context.state !== 'closed') void share.audioGain?.context.close().catch(() => {});
+    share.consumers.forEach((consumer) => consumer.close());
+    share.stream.getTracks().forEach((track) => track.stop());
+  }
+  shares.clear();
+}
+
 function App() {
   const [rooms, setRooms] = useState<ListedRoom[]>([]);
   const [room, setRoom] = useState<Room | null>(null);
@@ -287,6 +304,12 @@ function App() {
     return presets.some((preset) => preset.id === selected) ? selected : '1440p60';
   });
   const connection = useRef<Connection | null>(null);
+  const [connectedSite, setConnectedSite] = useState<SfuSelection | null>(null);
+  const getConnection = useCallback(() => connection.current, []);
+  const joining = useRef(false);
+  const connectionEpoch = useRef(0);
+  const pinnedSfu = useRef<{ site: SfuSelection; roomId: string; name: string } | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const shareMap = useRef(new Map<string, Share>());
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -304,27 +327,80 @@ function App() {
   const rpc = <E extends keyof RpcResponses>(socket: Socket, event: E, payload: RpcRequests[E]) =>
     new Promise<RpcResponses[E]>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(`サーバーから応答がありません (${event})`)), 15000);
-      socket.emit(event, payload, (result: ({ ok: true } & RpcResponses[E]) | { ok: false; error?: string }) => {
+      const receive = (result: ({ ok: true } & RpcResponses[E]) | { ok: false; error?: string }) => {
         clearTimeout(timeout);
         return result?.ok ? resolve(result) : reject(new Error(result?.error || '通信に失敗しました'));
-      });
+      };
+      if (event === 'room:sync') socket.emit(event, receive);
+      else socket.emit(event, payload, receive);
     });
 
   const connectRoom = useCallback(
-    async (roomId: string | null, displayName: string, create = false) => {
-      if (connection.current) return;
+    async function connectRoom(roomId: string | null, displayName: string, create = false): Promise<void> {
+      if (connection.current || joining.current) return;
+      joining.current = true;
+      const epoch = ++connectionEpoch.current;
       setConnecting(true);
-      const socket = io({ transports: ['websocket', 'polling'] });
+      let socket: Socket | undefined;
       try {
+        const fixed = pinnedSfu.current?.roomId === roomId ? pinnedSfu.current : null;
+        const site = fixed?.site || (await discoverSfu());
+        if (epoch !== connectionEpoch.current) return;
+        console.info(`[sfu] selected site=${site.id} RTT=${site.rttMs.toFixed(1)}ms; fixed for this room session`);
+        setConnectedSite(site);
+        socket = io(site.url, { transports: ['websocket', 'polling'], reconnection: false, timeout: 5000 });
+        const selectedSocket = socket;
         await new Promise<void>((resolve, reject) => {
-          socket.once('connect', resolve);
-          socket.once('connect_error', reject);
+          selectedSocket.once('connect', resolve);
+          selectedSocket.once('connect_error', reject);
         });
+        // The socket is fixed throughout this closure, including all media RPCs.
+        await initialize(selectedSocket, site);
+      } catch (error) {
+        const current = connection.current as Connection | null;
+        if (current && current.socket === socket) {
+          connection.current = null;
+          disposeMedia(current, shareMap.current);
+          updateShares();
+        }
+        socket?.disconnect();
+        if (epoch === connectionEpoch.current) {
+          setConnecting(false);
+          setConnectionError(errorMessage(error));
+          showNotice(errorMessage(error), true);
+          scheduleReconnect();
+        }
+      } finally {
+        if (epoch === connectionEpoch.current) joining.current = false;
+      }
+
+      function scheduleReconnect() {
+        const pinned = pinnedSfu.current;
+        if (!pinned || epoch !== connectionEpoch.current) return;
+        clearTimeout(reconnectTimer.current);
+        reconnectTimer.current = setTimeout(() => {
+          if (pinnedSfu.current === pinned && connectionEpoch.current === epoch) {
+            if (joining.current) scheduleReconnect();
+            else void connectRoom(pinned.roomId, pinned.name);
+          }
+        }, 2000);
+      }
+
+      async function initialize(socket: Socket, site: SfuSelection) {
         const pendingProducerEvents: ProducerAnnouncement[] = [];
+        const closedProducers = new Set<string>();
         let handleProducerNew: ((data: ProducerAnnouncement) => void) | null = null;
+        let handleProducerClosed: ((producerId: string, peerId?: string) => void) | null = null;
         socket.on('producer:new', (data: ProducerAnnouncement) => {
+          if (epoch !== connectionEpoch.current) return;
+          closedProducers.delete(data.producerId);
           if (handleProducerNew) handleProducerNew(data);
           else pendingProducerEvents.push(data);
+        });
+        socket.on('producer:closed', ({ producerId, peerId }) => {
+          if (epoch !== connectionEpoch.current) return;
+          closedProducers.add(producerId);
+          handleProducerClosed?.(producerId, peerId);
         });
         const response = await rpc(
           socket,
@@ -333,12 +409,17 @@ function App() {
             ? { name: displayName.trim() || 'ゲスト' }
             : { roomId: roomId || '', name: displayName.trim() || 'ゲスト' },
         );
+        if (epoch !== connectionEpoch.current || !socket.connected) throw new Error('接続が中断されました');
+        pinnedSfu.current = { site, roomId: response.roomId, name: displayName };
         const device = new Device();
         await device.load({ routerRtpCapabilities: response.rtpCapabilities });
+        const transports = new Set<Transport>();
         const createTransport = async (direction: 'send' | 'recv'): Promise<Transport> => {
           const info = await rpc(socket, 'transport:create', { direction });
           const transport =
             device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport']<ShareAppData>(info);
+          transports.add(transport);
+          transport.observer.once('close', () => transports.delete(transport));
           transport.on('connect', ({ dtlsParameters }, callback, errback) => {
             rpc(socket, 'transport:connect', { transportId: transport.id, dtlsParameters })
               .then(() => callback())
@@ -361,7 +442,12 @@ function App() {
           return transport;
         };
         const recvTransport = await createTransport('recv');
+        if (epoch !== connectionEpoch.current || !socket.connected) {
+          recvTransport.close();
+          throw new Error('接続が中断されました');
+        }
         connection.current = {
+          transports,
           socket,
           device,
           createSendTransport: () => createTransport('send'),
@@ -385,6 +471,16 @@ function App() {
         socket.on('producer:compatibility-request', compatibleSender.request);
         socket.on('producer:compatibility-stop', ({ producerId }) => compatibleSender.stop(producerId));
         socket.on('disconnect', () => compatibleSender.close());
+        socket.on('disconnect', () => {
+          if (connection.current?.socket !== socket || connectionEpoch.current !== epoch) return;
+          const current = connection.current;
+          connection.current = null;
+          disposeMedia(current, shareMap.current);
+          updateShares();
+          setConnectionError('接続が切れました。同じ配信サーバーへ再接続しています。');
+          showNotice('接続が切れました。同じ配信サーバーへ再接続します。画面共有は再開が必要です。', true);
+          scheduleReconnect();
+        });
 
         const subscribing = new Set<string>();
         const pendingAudio = new Map<string, { consumer: Consumer; track: MediaStreamTrack }[]>();
@@ -397,7 +493,8 @@ function App() {
           kind: Media.MediaKind = 'video',
           appData: ShareAppData = {},
         ) => {
-          if (shareMap.current.has(producerId) || subscribing.has(producerId)) return;
+          if (closedProducers.has(producerId) || shareMap.current.has(producerId) || subscribing.has(producerId))
+            return;
           subscribing.add(producerId);
           let consumer: Consumer | undefined;
           try {
@@ -407,6 +504,8 @@ function App() {
               rtpCapabilities: device.recvRtpCapabilities,
             });
             consumer = await recvTransport.consume<ShareAppData>(info);
+            if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
+            if (closedProducers.has(producerId)) throw new Error('共有が終了しています');
             configureScreenShareReceiver(consumer);
             if (kind === 'video' && producerId === focusProducer) {
               consumer.track.addEventListener('unmute', () => console.info('[popout] received the first video frame'), {
@@ -420,6 +519,8 @@ function App() {
             } else {
               await rpc(socket, 'consumer:resume', { consumerId: consumer.id });
             }
+            if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
+            if (closedProducers.has(producerId)) throw new Error('共有が終了しています');
             if (kind === 'video' && producerId === focusProducer) {
               setTimeout(async () => {
                 if (!consumer || consumer.closed) return;
@@ -530,6 +631,7 @@ function App() {
           } catch (error) {
             if (consumer) socket.emit('consumer:close', { consumerId: consumer.id });
             consumer?.close();
+            if (connection.current?.socket !== socket || closedProducers.has(producerId)) return;
             console.warn('Unable to consume producer', error);
             if (producerId === focusProducer) setConnectionError(`配信を受信できません: ${errorMessage(error)}`);
             else if (kind === 'video')
@@ -560,25 +662,31 @@ function App() {
         };
 
         socket.on('peer:joined', ({ id }) => {
+          if (connection.current?.socket !== socket) return;
           connection.current?.peerIds.add(id);
           setRoom((current) => (current ? { ...current, people: connection.current?.peerIds.size || 0 } : current));
         });
         handleProducerNew = (data) =>
           subscribe(data.producerId, data.peerId, data.peerName, data.label, data.profile, data.kind, data.appData);
         for (const data of pendingProducerEvents.splice(0)) handleProducerNew(data);
-        socket.on('producer:closed', ({ producerId, peerId }) => removeShare(producerId, peerId));
+        handleProducerClosed = removeShare;
         socket.on('peer:left', ({ peerId }) => {
+          if (connection.current?.socket !== socket) return;
           connection.current?.peerIds.delete(peerId);
           setRoom((current) => (current ? { ...current, people: connection.current?.peerIds.size || 0 } : current));
           for (const [producerId, share] of shareMap.current)
             if (share.peerId === peerId) removeShare(producerId, peerId);
         });
         socket.on('connect_error', (error) => showNotice(`接続エラー: ${errorMessage(error)}`, true));
-        for (const peer of response.peers) {
-          connection.current.peerIds.add(peer.id);
+        const synchronized = await rpc(socket, 'room:sync', {});
+        if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
+        connection.current.peerIds = new Set([socket.id!, ...synchronized.peers.map((peer) => peer.id)]);
+        for (const peer of synchronized.peers) {
+          if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
           for (const share of peer.shares)
             await subscribe(share.id, peer.id, peer.name, share.label, share.profile, share.kind, share.appData);
         }
+        if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
         setRoom({
           id: response.roomId,
           name: response.roomName || '配信ルーム',
@@ -587,12 +695,6 @@ function App() {
         setConnectionError('');
         setFocusedId(focusProducer || null);
         setConnecting(false);
-      } catch (error) {
-        socket.disconnect();
-        connection.current = null;
-        setConnecting(false);
-        setConnectionError(errorMessage(error));
-        showNotice(errorMessage(error), true);
       }
     },
     [showNotice, updateShares],
@@ -660,17 +762,14 @@ function App() {
 
   useEffect(
     () => () => {
+      ++connectionEpoch.current;
+      joining.current = false;
+      pinnedSfu.current = null;
+      clearTimeout(reconnectTimer.current);
       const current = connection.current;
       if (!current) return;
-      for (const share of shareMap.current.values()) {
-        share.producer?.close();
-        share.audioProducer?.close();
-        share.videoTransport?.close();
-        share.audioTransport?.close();
-        share.audioGain?.context.close();
-        share.consumers?.forEach((consumer) => consumer.close());
-        share.stream?.getTracks().forEach((track) => track.stop());
-      }
+      connection.current = null;
+      disposeMedia(current, shareMap.current);
       current.socket.disconnect();
     },
     [],
@@ -811,23 +910,21 @@ function App() {
   };
 
   const leaveRoom = () => {
+    ++connectionEpoch.current;
+    joining.current = false;
+    pinnedSfu.current = null;
+    setConnectedSite(null);
+    clearTimeout(reconnectTimer.current);
     const current = connection.current;
+    connection.current = null;
     for (const [producerId, share] of shareMap.current) {
       if (share.local) {
         current?.socket.emit('producer:close', { producerId });
         if (share.audioProducer) current?.socket.emit('producer:close', { producerId: share.audioProducer.id });
-        share.producer?.close();
-        share.audioProducer?.close();
-        share.videoTransport?.close();
-        share.audioTransport?.close();
-        share.audioGain?.context.close();
-        share.stream.getTracks().forEach((track) => track.stop());
-      } else {
-        share.consumers?.forEach((consumer) => consumer.close());
       }
     }
+    if (current) disposeMedia(current, shareMap.current);
     current?.socket.disconnect();
-    connection.current = null;
     shareMap.current.clear();
     setShares([]);
     setRoom(null);
@@ -888,6 +985,7 @@ function App() {
   if (focusProducer)
     return (
       <Popout
+        connectionInfo={<SfuConnectionInfo site={connectedSite} getConnection={getConnection} />}
         share={focusShare}
         errorMessage={connectionError}
         onVolume={setShareVolume}
@@ -900,6 +998,7 @@ function App() {
 
   return (
     <RoomView
+      connectionInfo={<SfuConnectionInfo site={connectedSite} getConnection={getConnection} />}
       room={room}
       shares={visibleShares}
       allShareCount={shares.length}
@@ -930,6 +1029,9 @@ function Lobby({ rooms, displayName, setDisplayName, onCreate, onJoin, notice, n
           <div>
             <div className="eyebrow">画面共有</div>
             <h1>共有をはじめる</h1>
+            <a className="cluster-link" href="/cluster">
+              クラスタ統計 →
+            </a>
           </div>
         </div>
         <div className="lobby-name">
@@ -1009,6 +1111,7 @@ function FloatingDiagnostics({ share, onClose }: { share: Share; onClose(): void
 }
 
 function RoomView({
+  connectionInfo,
   room,
   shares,
   allShareCount,
@@ -1068,6 +1171,7 @@ function RoomView({
           </button>
         </div>
       </div>
+      {connectionInfo}
       <div className="room-toolbar">
         <div className="toolbar-label">
           画面 <span className="count-pill">{focused ? allShareCount : shares.length}</span>
@@ -1228,7 +1332,7 @@ function RoomView({
   );
 }
 
-function Popout({ share, errorMessage, onVolume, onToggleMute, onFullscreen, onClose }: PopoutProps) {
+function Popout({ connectionInfo, share, errorMessage, onVolume, onToggleMute, onFullscreen, onClose }: PopoutProps) {
   const stage = useRef<HTMLElement | null>(null);
   const controls = usePlayerControls();
   const [diagnosticsShown, setDiagnosticsShown] = useState(false);
@@ -1254,6 +1358,9 @@ function Popout({ share, errorMessage, onVolume, onToggleMute, onFullscreen, onC
         </div>
       </header>
       <section className="focus-player">
+        <div className="popout-connection" data-player-controls>
+          {connectionInfo}
+        </div>
         <div
           className="video-wrap"
           onDoubleClick={(event) => {
@@ -1316,4 +1423,6 @@ function formatRemaining(milliseconds: number | null = 0) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(
+  location.pathname.replace(/\/$/, '') === '/cluster' ? <ClusterStatisticsPage /> : <App />,
+);

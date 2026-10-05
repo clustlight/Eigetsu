@@ -9,6 +9,10 @@
 		reverse_proxy sfu:3000
 	}
 
+	handle /sfu/* {
+		reverse_proxy sfu:3000
+	}
+
 	handle {
 		root * /srv
 		try_files {path} /index.html

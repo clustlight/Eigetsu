@@ -10,6 +10,7 @@ import { qualityPresets } from '/src/quality-presets.ts';
 import { produceScreenShareAudio } from '/src/screen-share-audio.ts';
 import './audio-browser-page.ts';
 import './compatibility-browser-page.ts';
+import './cluster-browser-page.ts';
 import { configureScreenShareReceiver, readScreenReceiveStats } from '/src/screen-share-receive.ts';
 
 window.runBitrateCheck = async (mode = 'fixed', presetId = '1440p60', inspectHardware = false, profilePrefix) => {

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { ListedRoom, Room, Share } from './types.ts';
 
 interface AudioControls {
@@ -15,6 +16,7 @@ export interface LobbyProps {
   noticeError: boolean;
 }
 export interface RoomViewProps extends AudioControls {
+  connectionInfo: ReactNode;
   room: Room;
   shares: Share[];
   allShareCount: number;
@@ -32,6 +34,7 @@ export interface RoomViewProps extends AudioControls {
   noticeError: boolean;
 }
 export interface PopoutProps extends AudioControls {
+  connectionInfo: ReactNode;
   share?: Share;
   errorMessage: string;
   onClose(): void;

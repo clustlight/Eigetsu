@@ -18,6 +18,7 @@
     "test:bitrate": "node tests/bitrate-browser.ts",
     "check:gpu": "node tests/bitrate-browser.ts --gpu",
     "test:compatibility": "node tests/bitrate-browser.ts --compatibility",
+    "test:cluster": "node tests/bitrate-browser.ts --cluster",
     "test:audio": "node tests/bitrate-browser.ts --audio",
     "test:controls": "node tests/bitrate-browser.ts --controls"
   },

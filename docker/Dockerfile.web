@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY index.html vite.config.ts tsconfig.json ./
 COPY src ./src
+COPY sfu/statistics-types.ts ./sfu/statistics-types.ts
 RUN npm run build
 
 FROM caddy:2.11.6-builder-alpine AS caddy-builder

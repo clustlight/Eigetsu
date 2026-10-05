@@ -6,6 +6,7 @@
     "strict": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
+    "rewriteRelativeImportExtensions": true,
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "."
