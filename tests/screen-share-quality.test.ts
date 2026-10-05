@@ -7,7 +7,7 @@ import {
   screenShareEncodingOptions,
   selectScreenShareCodec,
 } from '../src/screen-share-quality.ts';
-import { qualityPresets } from '../src/quality-presets.ts';
+import { defaultQualityPreset, qualityPresets } from '../src/quality-presets.ts';
 import type { MediaStatsSample } from '../src/media-stats.ts';
 import type { types as Media } from 'mediasoup-client';
 import type { Transport } from '../src/types.ts';
@@ -177,6 +177,7 @@ test('each screen gets its own transport and bitrate configuration', async () =>
 });
 
 test('every selectable quality uses its own bitrate and frame rate budget', () => {
+  assert.equal(defaultQualityPreset.id, '4k60');
   assert.equal(new Set(qualityPresets.map((preset) => preset.id)).size, qualityPresets.length);
   for (const preset of qualityPresets) {
     const options = screenShareEncodingOptions(preset);

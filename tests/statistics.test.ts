@@ -7,7 +7,7 @@ import { io as connect } from 'socket.io-client';
 import { Coordinator } from '../sfu/coordinator.ts';
 import { summarizeTraffic } from '../sfu/statistics.ts';
 import type { ControlReply, ControlRequest } from '../sfu/cluster-types.ts';
-import type { ClusterStatistics, SfuStatistics } from '../sfu/statistics-types.ts';
+import type { ClusterStatistics } from '../sfu/statistics-types.ts';
 import type { Socket } from 'socket.io-client';
 
 const require = createRequire(new URL('../sfu/package.json', import.meta.url));

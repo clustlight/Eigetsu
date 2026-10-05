@@ -18,4 +18,4 @@ export const qualityPresets: QualityPreset[] = [
   { id: '720p30', label: '720p · 30 FPS', width: 1280, height: 720, fps: 30, bitrate: 3_000_000 },
 ];
 
-export const defaultQualityPreset = qualityPresets.find((preset) => preset.id === '1440p60')!;
+export const defaultQualityPreset = qualityPresets.find((preset) => preset.id === '4k60')!;

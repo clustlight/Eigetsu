@@ -297,11 +297,11 @@ function App() {
     const storageKey = 'eigetsu-quality-preset';
     const saved = localStorage.getItem(storageKey);
     if (!localStorage.getItem('eigetsu-quality-preset-v2')) {
-      if (!saved || saved === '4k30') localStorage.setItem(storageKey, '1440p60');
+      if (!saved || saved === '4k30') localStorage.setItem(storageKey, defaultQualityPreset.id);
       localStorage.setItem('eigetsu-quality-preset-v2', '1');
     }
-    const selected = localStorage.getItem(storageKey) || '1440p60';
-    return presets.some((preset) => preset.id === selected) ? selected : '1440p60';
+    const selected = localStorage.getItem(storageKey) || defaultQualityPreset.id;
+    return presets.some((preset) => preset.id === selected) ? selected : defaultQualityPreset.id;
   });
   const connection = useRef<Connection | null>(null);
   const [connectedSite, setConnectedSite] = useState<SfuSelection | null>(null);

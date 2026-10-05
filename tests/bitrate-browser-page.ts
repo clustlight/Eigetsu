@@ -6,14 +6,19 @@ import {
   produceScreenShareVideo,
   selectScreenShareCodec,
 } from '/src/screen-share-quality.ts';
-import { qualityPresets } from '/src/quality-presets.ts';
+import { defaultQualityPreset, qualityPresets } from '/src/quality-presets.ts';
 import { produceScreenShareAudio } from '/src/screen-share-audio.ts';
 import './audio-browser-page.ts';
 import './compatibility-browser-page.ts';
 import './cluster-browser-page.ts';
 import { configureScreenShareReceiver, readScreenReceiveStats } from '/src/screen-share-receive.ts';
 
-window.runBitrateCheck = async (mode = 'fixed', presetId = '1440p60', inspectHardware = false, profilePrefix) => {
+window.runBitrateCheck = async (
+  mode = 'fixed',
+  presetId = defaultQualityPreset.id,
+  inspectHardware = false,
+  profilePrefix,
+) => {
   const preset = qualityPresets.find((item) => item.id === presetId);
   if (!preset) throw new Error(`Unknown preset: ${presetId}`);
   const socket = io('http://127.0.0.1:13000', { transports: ['websocket'] });
