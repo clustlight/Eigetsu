@@ -14,14 +14,15 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const audioOnly = process.argv.includes('--audio');
 const controlsOnly = process.argv.includes('--controls');
 const compatibilityOnly = process.argv.includes('--compatibility');
-const clusterOnly = process.argv.includes('--cluster');
+const clusterUi = process.argv.includes('--cluster-ui');
+const clusterOnly = process.argv.includes('--cluster') || clusterUi;
 const inspectGpu = process.argv.includes('--gpu');
 const gpuProfile = process.argv.find((arg) => arg.startsWith('--gpu-profile='))?.split('=')[1];
 assert.ok(
   !gpuProfile || (inspectGpu && /^[0-9a-f]{4}$/i.test(gpuProfile)),
   'Use --gpu --gpu-profile=<four hex digits>',
 );
-const browserPage = controlsOnly ? '/' : '/tests/bitrate-browser.html';
+const browserPage = controlsOnly || clusterUi ? '/' : '/tests/bitrate-browser.html';
 const browserPath =
   process.env.BROWSER_BIN ||
   [
@@ -233,17 +234,21 @@ try {
       browserSocket.close();
     }
   }
+  if (clusterUi) {
+    const { runClusterUiCheck } = await import('./cluster-ui-browser.ts');
+    await runClusterUiCheck({ evaluate, command });
+  }
   if (controlsOnly) {
     const { runPlayerControlsCheck } = await import('./player-controls-browser.ts');
     await runPlayerControlsCheck({ evaluate, command, root });
   }
-  for (let i = 0; !controlsOnly && i < 50; i++) {
+  for (let i = 0; !controlsOnly && !clusterUi && i < 50; i++) {
     if ((await evaluate(`typeof window.${audioOnly ? 'runAudioCheck' : 'runBitrateCheck'}`)) === 'function') break;
     if (i === 49) throw new Error('Browser test fixture failed to load');
     await delay(200);
   }
-  if (clusterOnly) console.log('Cluster:', JSON.stringify(await evaluate('window.runClusterCheck()')));
-  if (audioOnly || clusterOnly) {
+  if (clusterOnly && !clusterUi) console.log('Cluster:', JSON.stringify(await evaluate('window.runClusterCheck()')));
+  if (audioOnly || (clusterOnly && !clusterUi)) {
     const result = await evaluate(clusterOnly ? 'window.runAudioCheck(13010, 13000)' : 'window.runAudioCheck()');
     const mean = (samples) =>
       [0, 1].map((channel) => samples.reduce((sum, sample) => sum + sample[channel], 0) / samples.length);
@@ -302,7 +307,7 @@ try {
       `audio: stable stereo RMS ${full.map((value) => value.toFixed(4)).join(', ')}; 50%/25% gain and mute passed`,
     );
   }
-  if (compatibilityOnly || clusterOnly) {
+  if (compatibilityOnly || (clusterOnly && !clusterUi)) {
     console.log(
       'Profile compatibility:',
       JSON.stringify(
@@ -310,7 +315,7 @@ try {
       ),
     );
   }
-  if (clusterOnly) {
+  if (clusterOnly && !clusterUi) {
     const recoveryRoom = await evaluate('window.runClusterCheck(true)');
     const before = await evaluate('window.clusterRecovery.frames()');
     let exited = once(sfu, 'exit');
@@ -343,21 +348,26 @@ try {
         'Page.addScriptToEvaluateOnNewDocument',
         {
           source: `
-        window.__probes = 0; window.__socketUrls = [];
-        const realFetch = window.fetch;
-        window.fetch = async (...args) => {
-          const url = String(args[0]);
-          if (url.includes('/sfu/ping')) {
-            window.__probes++;
-            await new Promise(resolve => setTimeout(resolve, url.includes(':13010/') ? 0 : 100));
+        window.__probes = 0; window.__socketUrls = []; window.__mediaRtts = [];
+        // Loopback cannot reproduce WAN latency. Inject candidate-pair RTTs
+        // while preserving actual ICE negotiation and connectivity at each SFU.
+        const realStats = RTCPeerConnection.prototype.getStats;
+        RTCPeerConnection.prototype.getStats = async function(...args) {
+          const report = await realStats.apply(this, args);
+          for (const stat of report.values()) {
+            if (stat.type !== 'candidate-pair' || stat.currentRoundTripTime == null) continue;
+            const port = report.get(stat.remoteCandidateId)?.port;
+            window.__mediaRtts.push({port, rtt: stat.currentRoundTripTime});
+            stat.currentRoundTripTime = port >= 41200 && port <= 41300 ? 0.005 : 0.15;
           }
-          return realFetch(...args);
+          return report;
         };
         const RealWebSocket = window.WebSocket;
         window.WebSocket = class extends RealWebSocket {
-          constructor(...args) {
-            super(...args);
-            if (String(args[0]).includes('/socket.io/')) window.__socketUrls.push(String(args[0]));
+          send(data) {
+            if (typeof data === 'string' && data.startsWith('40/probe')) window.__probes++;
+            else if (typeof data === 'string' && data.startsWith('40')) window.__socketUrls.push(this.url);
+            return super.send(data);
           }
         };
       `,
@@ -370,7 +380,9 @@ try {
           if (await evaluate(expression, sessionId)) return;
           await delay(100);
         }
-        throw new Error(`Application condition timed out: ${expression}`);
+        throw new Error(
+          `Application condition timed out: ${expression}; ${JSON.stringify(await evaluate('({ text: document.body.innerText, urls: window.__socketUrls, probes: window.__probes, rtts: window.__mediaRtts })', sessionId))}`,
+        );
       };
       await waitPage(
         "window.__socketUrls.some(url => url.includes(':13010/')) && Boolean(document.querySelector('.room-header'))",
@@ -378,7 +390,7 @@ try {
       await waitPage("document.querySelector('.stream-card video')?.videoWidth > 0");
       const probes = await evaluate('window.__probes', sessionId);
       const applicationRoom = await evaluate("document.querySelector('.room-code').textContent", sessionId);
-      assert.equal(probes, 12, 'Expected warmup and three RTT samples at each site');
+      assert.equal(probes, 3, 'Expected a WebRTC probe at each site');
       await waitPage(
         "document.querySelector('.sfu-connection')?.textContent.includes('接続先SFU：b') && document.querySelector('.transport-list')?.textContent.includes('UDP')",
       );

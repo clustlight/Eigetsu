@@ -10,6 +10,8 @@ import { Coordinator } from './coordinator.ts';
 import { Federation, type ProducerLease } from './federation.ts';
 import type { RoomSnapshot } from './cluster-types.js';
 import { createStatisticsCollector } from './statistics.ts';
+import { createWebRtcTransport } from './webrtc-transport.ts';
+import { installSfuProbe } from './probe.ts';
 
 const config = readClusterConfig();
 
@@ -260,6 +262,7 @@ io.on('connection', (socket) => {
   const transports = new Map<string, mediasoup.types.WebRtcTransport>();
   const producers = new Map<string, Producer>();
   const consumers = new Map<string, mediasoup.types.Consumer>();
+  const keyFrameRequests = new Map<string, number>();
   const consumerSetupTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const acknowledgeConsumer = (id: string) => {
     clearTimeout(consumerSetupTimers.get(id));
@@ -345,21 +348,8 @@ io.on('connection', (socket) => {
   socket.on('transport:create', async ({ direction }, callback) => {
     try {
       if (!room) throw new Error('先にルームに参加してください');
-      const listenIp = process.env.MEDIASOUP_LISTEN_IP || '0.0.0.0';
-      const announcedAddress =
-        process.env.MEDIASOUP_ANNOUNCED_IP ||
-        (listenIp === '0.0.0.0' ? '127.0.0.1' : listenIp === '::' ? '::1' : undefined);
-      const transport = await room.router.createWebRtcTransport({
-        listenInfos: [
-          { protocol: 'udp', ip: listenIp, announcedAddress },
-          { protocol: 'tcp', ip: listenIp, announcedAddress },
-        ],
-        enableUdp: true,
-        enableTcp: true,
-        preferUdp: true,
-        initialAvailableOutgoingBitrate: 30_000_000,
-        appData: { direction },
-      });
+      const transport = await createWebRtcTransport(room.router);
+      transport.appData.direction = direction;
       if (!socket.connected) {
         transport.close();
         throw new Error('Participant disconnected');
@@ -368,7 +358,7 @@ io.on('connection', (socket) => {
       clientTransports.add(transport);
       transport.observer.once('close', () => clientTransports.delete(transport));
       console.info(
-        `[webrtc] transport=${transport.id} direction=${direction} announcedAddress=${announcedAddress} candidates=${JSON.stringify(transport.iceCandidates.map(({ protocol, address, port }) => ({ protocol, address, port })))}`,
+        `[webrtc] transport=${transport.id} direction=${direction} candidates=${JSON.stringify(transport.iceCandidates.map(({ protocol, address, port }) => ({ protocol, address, port })))}`,
       );
       transport.on('icestatechange', (state) => console.info(`[webrtc] transport=${transport.id} ICE=${state}`));
       transport.on('dtlsstatechange', (state) => {
@@ -510,7 +500,10 @@ io.on('connection', (socket) => {
       }, 30000);
       setupTimer.unref();
       consumerSetupTimers.set(consumer.id, setupTimer);
-      consumer.observer.once('close', () => acknowledgeConsumer(consumed.id));
+      consumer.observer.once('close', () => {
+        acknowledgeConsumer(consumed.id);
+        keyFrameRequests.delete(consumed.id);
+      });
       const compatibility = source.appData.compatibilityFor
         ? room.compatibilityStreams.get(source.appData.compatibilityFor)
         : undefined;
@@ -552,6 +545,22 @@ io.on('connection', (socket) => {
       acknowledgeConsumer(consumerId);
       await consumer.resume();
       await federation.synchronizeConsumer(consumer);
+      if (consumer.kind === 'video') await consumer.requestKeyFrame();
+      reply(callback, { ok: true });
+    } catch (error) {
+      reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  socket.on('consumer:keyframe', async ({ consumerId }, callback) => {
+    try {
+      const consumer = consumers.get(consumerId);
+      if (!consumer || consumer.kind !== 'video') throw new Error('Video consumer not found');
+      if (!consumer.paused && Date.now() - (keyFrameRequests.get(consumerId) || 0) >= 1000) {
+        keyFrameRequests.set(consumerId, Date.now());
+        await federation.synchronizeConsumer(consumer);
+        await consumer.requestKeyFrame();
+      }
       reply(callback, { ok: true });
     } catch (error) {
       reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -598,6 +607,7 @@ io.on('connection', (socket) => {
 
 const workerCount = Math.max(1, Number(process.env.MEDIASOUP_WORKERS || 1));
 for (let i = 0; i < workerCount; i++) workers.push(await createWorker());
+installSfuProbe(io, workers[0], config.site.id, () => cluster.ready);
 server.listen(config.port, '0.0.0.0', () => {
   console.log(`Eigetsu signaling/SFU site=${config.site.id} role=${config.role} listening on :${config.port}`);
   cluster.connect();

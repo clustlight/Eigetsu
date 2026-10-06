@@ -35,6 +35,7 @@ interface ShareBase {
   previewEnabled?: boolean;
   captureSurface?: string;
   videoElement?: HTMLVideoElement | null;
+  requestKeyFrame?: () => Promise<void>;
   producer?: Producer;
   videoConsumer?: Consumer;
   videoTransport?: Transport;
@@ -118,6 +119,7 @@ export interface RpcResponses {
   consume: Media.ConsumerOptions<ShareAppData>;
   'consumer:pause': object;
   'consumer:resume': object;
+  'consumer:keyframe': object;
 }
 export interface RpcRequests {
   'room:create': { name: string };
@@ -129,4 +131,5 @@ export interface RpcRequests {
   consume: { transportId: string; producerId: string; rtpCapabilities: Media.RtpCapabilities };
   'consumer:pause': { consumerId: string };
   'consumer:resume': { consumerId: string };
+  'consumer:keyframe': { consumerId: string };
 }

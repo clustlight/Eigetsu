@@ -3,33 +3,42 @@ import { test } from 'node:test';
 import { selectSfu } from '../src/sfu-selection.ts';
 import { readClusterConfig } from '../sfu/cluster-config.ts';
 
-test('SFU selection ignores connection setup and uses a median rather than an isolated fast response', async () => {
+test('SFU selection chooses the lowest media RTT even when the master is listed first and responds first', async () => {
   const sites = ['a', 'b', 'offline'].map((id) => ({ id, url: `https://${id}.example.com` }));
-  const timings = new Map([
-    ['a', [900, 8, 9, 8]],
-    ['b', [2, 1, 30, 32]],
-    ['offline', []],
-  ]);
   const selected = await selectSfu(sites, async ({ id }) => {
-    const elapsed = timings.get(id)?.shift();
-    if (elapsed === undefined) throw new Error('Unavailable');
-    return elapsed;
+    if (id === 'a') return 80;
+    if (id === 'offline') throw new Error('No ICE connection');
+    // Slower signaling/negotiation at B must not affect its measured media RTT.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return 8;
   });
-  assert.equal(selected.id, 'a');
+  assert.equal(selected.id, 'b');
   assert.equal(selected.rttMs, 8);
 });
 
-test('SFU selection excludes sites without two successful samples and reports total failure', async () => {
+test('SFU selection reports failure when media is unreachable instead of falling back to the master', async () => {
   const sites = [{ id: 'a', url: 'https://a.example.com' }];
   let attempts = 0;
   await assert.rejects(
     selectSfu(sites, async () => {
-      if (++attempts === 2) return 1;
+      attempts++;
       throw new Error('Unavailable');
     }),
     /接続できる/,
   );
-  assert.equal(attempts, 4);
+  assert.equal(attempts, 1);
+});
+
+test('SFU selection rejects invalid RTTs and resolves ties deterministically', async () => {
+  const sites = ['b', 'a', 'invalid', 'negative'].map((id) => ({ id, url: `https://${id}.example.com` }));
+  assert.equal(
+    (await selectSfu(sites, async ({ id }) => (id === 'invalid' ? NaN : id === 'negative' ? -1 : 0))).id,
+    'a',
+  );
+  await assert.rejects(
+    selectSfu([], async () => 0),
+    /接続できる/,
+  );
 });
 
 test('the same package supports standalone, master and SFU roles with validated cluster configuration', () => {

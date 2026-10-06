@@ -41,6 +41,7 @@ import {
   readVideoPlaybackStats,
 } from './screen-share-receive.ts';
 import { ClusterStatisticsPage, SfuConnectionInfo } from './sfu-monitor.tsx';
+import { recoverVideoFrame } from './video-frame-recovery.ts';
 import './style.css';
 
 const params = new URLSearchParams(location.search);
@@ -72,20 +73,30 @@ function Video({
     if (share) share.videoElement = video;
     return () => {
       if (share?.videoElement === video) share.videoElement = null;
-      if (video) video.srcObject = null;
     };
   }, [share]);
   useEffect(() => {
-    if (ref.current) {
-      ref.current.srcObject = enabled ? stream : null;
-      if (enabled)
-        ref.current
-          .play()
-          .then(() => setPlayBlocked(false))
-          .catch(() => setPlayBlocked(true));
-      else setPlayBlocked(false);
-    }
-  }, [stream, enabled]);
+    const video = ref.current;
+    if (!video) return;
+    let disposed = false;
+    video.srcObject = enabled ? stream : null;
+    if (enabled)
+      video.play().then(
+        () => {
+          if (!disposed) setPlayBlocked(false);
+        },
+        () => {
+          if (!disposed) setPlayBlocked(true);
+        },
+      );
+    else setPlayBlocked(false);
+    const stopRecovery = enabled && share.requestKeyFrame ? recoverVideoFrame(video, share.requestKeyFrame) : undefined;
+    return () => {
+      disposed = true;
+      stopRecovery?.();
+      video.srcObject = null;
+    };
+  }, [stream, enabled, share]);
   return (
     <>
       <video ref={ref} autoPlay playsInline muted={muted} />
@@ -603,6 +614,10 @@ function App() {
                 consumers: [consumer],
                 videoConsumer: consumer,
                 recvTransport,
+                requestKeyFrame: async () => {
+                  if (consumer && !consumer.closed && socket.connected)
+                    await rpc(socket, 'consumer:keyframe', { consumerId: consumer.id });
+                },
                 videoPaused: initiallyPaused,
                 videoPauseTarget: initiallyPaused,
                 videoPauseSyncing: false,
@@ -742,6 +757,8 @@ function App() {
             share.videoPaused !== share.videoPauseTarget
           ) {
             const pause = share.videoPauseTarget;
+            // Enable the receiving track before asking the SFU for its resume keyframe.
+            if (!pause) share.videoConsumer.resume();
             await rpc(current.socket, pause ? 'consumer:pause' : 'consumer:resume', {
               consumerId: share.videoConsumer.id,
             });
@@ -751,6 +768,7 @@ function App() {
             share.videoPaused = pause;
           }
         } catch (error) {
+          if (share.videoPaused) share.videoConsumer.pause();
           share.videoPauseTarget = share.videoPaused;
           showNotice(`映像受信を切り替えられません: ${errorMessage(error)}`, true);
         } finally {

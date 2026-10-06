@@ -50,6 +50,7 @@ export interface ClientEvents {
     reply: Ack,
   ) => void;
   'consumer:resume': (data: { consumerId: string }, reply: Ack) => void;
+  'consumer:keyframe': (data: { consumerId: string }, reply: Ack) => void;
   'consumer:pause': (data: { consumerId: string }, reply: Ack) => void;
   'consumer:close': (data: { consumerId: string }) => void;
   'producer:close': (data: { producerId: string }) => void;

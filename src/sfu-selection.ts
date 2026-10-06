@@ -6,24 +6,12 @@ export interface SfuSelection extends SfuSite {
   rttMs: number;
 }
 
-export function median(values: number[]) {
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
 /** Probe only before joining. Callers keep the returned endpoint for the whole room session. */
 export async function selectSfu(sites: SfuSite[], probe: (site: SfuSite) => Promise<number>): Promise<SfuSelection> {
   const measured = await Promise.all(
     sites.map(async (site) => {
-      // DNS, TLS and connection setup should not dominate the comparison.
-      await probe(site).catch(() => {});
-      const samples: number[] = [];
-      for (let i = 0; i < 3; i++) {
-        const elapsed = await probe(site).catch(() => NaN);
-        if (Number.isFinite(elapsed) && elapsed >= 0) samples.push(elapsed);
-      }
-      return samples.length >= 2 ? { ...site, rttMs: median(samples) } : null;
+      const rttMs = await probe(site).catch(() => NaN);
+      return Number.isFinite(rttMs) && rttMs >= 0 ? { ...site, rttMs } : null;
     }),
   );
   const available = measured.filter((site): site is SfuSelection => site !== null);
@@ -52,14 +40,6 @@ export async function discoverSfu(): Promise<SfuSelection> {
       throw new Error('配信サーバーの接続先が不正です');
     return { id: site.id, url: url.origin };
   });
-  return selectSfu(sites, async (site) => {
-    const start = performance.now();
-    const result = await fetch(`${site.url}/sfu/ping?nonce=${crypto.randomUUID()}`, {
-      cache: 'no-store',
-      credentials: 'omit',
-      signal: AbortSignal.timeout(1500),
-    });
-    if (!result.ok || (await result.json()).siteId !== site.id) throw new Error('SFU probe failed');
-    return performance.now() - start;
-  });
+  const { probeSfuMedia } = await import('./sfu-probe.ts');
+  return selectSfu(sites, probeSfuMedia);
 }

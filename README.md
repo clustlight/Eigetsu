@@ -40,7 +40,7 @@ For Cloudflare DNS validation with Let's Encrypt, configure `.env` and add `dock
 
 The same web, API and SFU images run at every site. Set `ROLE=master` at one site and `ROLE=sfu` at the others; the master site also serves local WebRTC clients. `ROLE=standalone` remains the default for a single installation. Site IDs, public HTTPS origins, master URL, shared cluster secret and inter-site media addresses are runtime configuration, with no site-specific builds. See [the multi-site deployment instructions](DEPLOYMENT.md#multiple-sites-with-one-package).
 
-The master owns room IDs, names, participants, stream announcements and each participant's assigned site. Before joining, browsers measure a warmup plus three HTTPS round trips to each available SFU and choose the lowest median with at least two successful samples. These measurements estimate the signaling path, not UDP capacity. The selected endpoint is fixed for the room session: no automatic migration and no Anycast are used. A signaling disconnect retries the same site, recreates the room's transports and stops existing screen captures; the user must start sharing again. Leaving and joining a new session runs selection again.
+The master owns room IDs, names, participants, stream announcements and each participant's assigned site. Before joining, browsers open a temporary WebRTC data channel to each available SFU and choose the lowest selected ICE candidate-pair RTT. Probes use the same addresses and UDP/TCP preference as room media, without capture permissions or room membership. HTTPS setup time and the master's role do not affect ranking. Unreachable media endpoints are excluded; a failed probe does not fall back to HTTP ranking. The selected endpoint is fixed for the room session: no automatic migration and no Anycast are used. A signaling disconnect retries the same site, recreates the room's transports and stops existing screen captures; the user must start sharing again. Leaving and joining a new session runs selection again.
 
 Browsers send and receive media through their selected SFU. A destination SFU requests a stream only when one of its local clients consumes it. All clients at that site share one SRTP/RTX PipeTransport stream for each source/codec variant; each subscribed site receives its own copy. Audio and compatible H.264 video are separate streams. When every local video consumer pauses, the origin pauses that inter-site stream. When the last consumer closes, both sides release the pipe. Room metadata and pipe setup travel through the master; RTP travels directly between SFUs and does not require the master site as a relay.
 
@@ -102,7 +102,7 @@ Each site runs the same web, API and SFU services. The master role is on one sit
              SRTP / RTX only while a remote site has subscribers
 ```
 
-Run `npm run test:cluster` for the multi-site integration check. `npm test` covers SFU selection and coordinator behavior.
+Run `npm run test:cluster` for the multi-site integration check and `npm run test:cluster-ui` for initial playback, expansion and switching between shares from another site. `npm test` covers SFU selection, probe cleanup, first-frame recovery and coordinator behavior.
 
 ## Screen sharing and audio
 

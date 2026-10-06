@@ -105,7 +105,7 @@ export function SfuConnectionInfo({
           接続先 <b>{site.url}</b>
         </span>
         <span>
-          選定時RTT <b>{milliseconds(site.rttMs)}</b>
+          選定時WebRTC RTT <b>{milliseconds(site.rttMs)}</b>
         </span>
         <span>
           現在の制御通信RTT <b>{milliseconds(sample.signalingRtt)}</b>
