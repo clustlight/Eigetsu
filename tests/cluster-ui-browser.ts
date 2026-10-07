@@ -1,14 +1,15 @@
+import type { BrowserHarness } from './browser-harness.ts';
 import assert from 'node:assert/strict';
 
-export async function runClusterUiCheck({ evaluate, command }) {
-  const wait = async (expression, sessionId) => {
+export async function runClusterUiCheck({ evaluate, command }: BrowserHarness) {
+  const wait = async (expression: string, sessionId?: string) => {
     for (let i = 0; i < 150; i++) {
       if (await evaluate(expression, sessionId)) return;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error(`Cluster UI timed out: ${expression}`);
   };
-  const pinSite = (siteId, sessionId) =>
+  const pinSite = (siteId: string, sessionId?: string) =>
     evaluate(
       `(() => {
     const original = window.fetch;
@@ -20,13 +21,13 @@ export async function runClusterUiCheck({ evaluate, command }) {
   })()`,
       sessionId,
     );
-  const playing = async (sessionId) => {
+  const playing = async (sessionId?: string) => {
     await wait(
       "document.querySelector('.video-wrap video')?.getVideoPlaybackQuality().totalVideoFrames > 3",
       sessionId,
     );
     assert.equal(await evaluate("document.querySelector('.video-wrap video').paused", sessionId), false);
-    const frames = await evaluate(
+    const frames = await evaluate<number>(
       "document.querySelector('.video-wrap video').getVideoPlaybackQuality().totalVideoFrames",
       sessionId,
     );
@@ -49,7 +50,7 @@ export async function runClusterUiCheck({ evaluate, command }) {
     );
   };
   await wait("Boolean(document.querySelector('.create-card button'))");
-  const probes = await evaluate(`(async () => {
+  const probes = await evaluate<Array<{ id: string; rtt: number }>>(`(async () => {
     const { probeSfuMedia } = await import('/src/sfu-probe.ts');
     const sites = await (await fetch('/sfu/sites')).json();
     return Promise.all(sites.map(async site => ({ id: site.id, rtt: await probeSfuMedia(site) })));
@@ -78,7 +79,10 @@ export async function runClusterUiCheck({ evaluate, command }) {
     await pinSite('b', sessionId);
     await evaluate("document.querySelector('.room-join-button').click()", sessionId);
     await wait("Boolean(document.querySelector('.stream-card'))", sessionId);
-    assert.match(await evaluate("document.querySelector('.sfu-connection summary').textContent", sessionId), /SFU：b/);
+    assert.match(
+      await evaluate<string>("document.querySelector('.sfu-connection summary').textContent", sessionId),
+      /SFU：b/,
+    );
     await playing(sessionId);
     await evaluate("document.querySelector('.screen-expand').click()", sessionId);
     await playing(sessionId);

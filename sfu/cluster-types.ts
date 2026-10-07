@@ -11,17 +11,20 @@ export interface ClusterPeer extends PeerInfo {
   siteId: string;
 }
 export interface RoomSnapshot {
+  voiceChatEnabled?: boolean;
   id: string;
   name: string;
   peers: ClusterPeer[];
   emptySince: number | null;
 }
 export interface LocalSnapshot {
+  voiceChatEnabled?: boolean;
   id: string;
   name: string;
   peers: PeerInfo[];
 }
 export type ControlRequest =
+  | { action: 'voice'; roomId: string; peerId: string; enabled: boolean }
   | { action: 'register'; rooms: LocalSnapshot[] }
   | { action: 'sites' | 'rooms' | 'statistics' }
   | { action: 'join'; roomId?: string; peerId: string; name: string }

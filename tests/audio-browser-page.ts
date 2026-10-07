@@ -1,34 +1,31 @@
 import { Device } from 'mediasoup-client';
-import { io } from 'socket.io-client';
-import { produceScreenShareAudio, setSharedAudioGain } from '/src/screen-share-audio.ts';
-import { configureScreenShareReceiver } from '/src/screen-share-receive.ts';
+import { io, type Socket } from 'socket.io-client';
+import { createRpc, check } from './browser-rpc.ts';
+import type { BrowserPeer } from './browser-rpc.ts';
+import type { Consumer, Transport, ShareAppData } from '../src/types.ts';
+import { produceScreenShareAudio, setSharedAudioGain } from '../src/screen-share-audio.ts';
+import { configureScreenShareReceiver } from '../src/screen-share-receive.ts';
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-window.runAudioCheck = async (senderPort = 13000, viewerPort = 13000) => {
-  const sockets = [];
-  const transports = [];
+export const runAudioCheck = async (senderPort = 13000, viewerPort = 13000) => {
+  const sockets: Socket[] = [];
+  const transports: Transport[] = [];
   const context = new AudioContext({ sampleRate: 48_000 });
-  let audio;
-  let consumer;
-  let sourceTrack;
-  let playback;
+  let audio: Awaited<ReturnType<typeof produceScreenShareAudio>> | undefined;
+  let consumer: Consumer | undefined;
+  let sourceTrack: MediaStreamTrack | undefined;
+  let playback: HTMLAudioElement | undefined;
   try {
     await context.resume();
-    const connect = async (port) => {
+    const connect = async (port: number) => {
       const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
       sockets.push(socket);
-      await new Promise((resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
         socket.once('connect', resolve);
         socket.once('connect_error', reject);
       });
-      const rpc = (event, payload = {}) =>
-        new Promise((resolve, reject) => {
-          socket.timeout(10000).emit(event, payload, (err, result) => {
-            if (err || !result.ok) reject(err || new Error(result.error));
-            else resolve(result);
-          });
-        });
+      const rpc = createRpc(socket, 10000);
       return { socket, rpc };
     };
     const sender = await connect(senderPort);
@@ -39,9 +36,14 @@ window.runAudioCheck = async (senderPort = 13000, viewerPort = 13000) => {
     const recvDevice = new Device();
     await sendDevice.load({ routerRtpCapabilities: room.rtpCapabilities });
     await recvDevice.load({ routerRtpCapabilities: room.rtpCapabilities });
-    const createTransport = async (client, device, direction) => {
+    const createTransport = async (
+      client: Pick<BrowserPeer, 'socket' | 'rpc'>,
+      device: Device,
+      direction: 'send' | 'recv',
+    ) => {
       const info = await client.rpc('transport:create', { direction });
-      const transport = device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
+      const transport =
+        device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport']<ShareAppData>(info);
       transports.push(transport);
       transport.on('connect', ({ dtlsParameters }, ok, fail) => {
         client.rpc('transport:connect', { transportId: transport.id, dtlsParameters }).then(ok, fail);
@@ -125,7 +127,9 @@ window.runAudioCheck = async (senderPort = 13000, viewerPort = 13000) => {
     setSharedAudioGain(audio.audioGain, 0.25);
     await delay(500);
     const quarter = await samples();
+    check(audio.producer.rtpSender && audio.producer.track, 'Audio sender is unavailable');
     const codec = audio.producer.rtpSender.getParameters().codecs.find((codec) => /audio\/opus/i.test(codec.mimeType));
+    check(codec?.sdpFmtpLine, 'Opus codec parameters are unavailable');
     const stats = [...(await consumer.getStats()).values()].filter((stat) => stat.type === 'inbound-rtp');
     return {
       full,
@@ -161,3 +165,5 @@ window.runAudioCheck = async (senderPort = 13000, viewerPort = 13000) => {
     await context.close();
   }
 };
+
+window.runAudioCheck = runAudioCheck;

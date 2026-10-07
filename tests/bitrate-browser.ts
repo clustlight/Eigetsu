@@ -1,3 +1,16 @@
+import type { BrowserHarness, CdpResults, CdpResponse } from './browser-harness.ts';
+import type { runAudioCheck } from './audio-browser-page.ts';
+import type { runBitrateCheck } from './bitrate-browser-page.ts';
+import type { ListedRoom } from '../src/types.ts';
+import type { ClusterStatistics } from '../sfu/statistics-types.ts';
+interface DebuggerTab {
+  type: string;
+  url: string;
+  webSocketDebuggerUrl: string;
+}
+interface GpuInfo {
+  gpu: { devices: unknown[]; featureStatus: Record<string, string>; videoEncoding: unknown[] };
+}
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
@@ -14,7 +27,8 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const audioOnly = process.argv.includes('--audio');
 const controlsOnly = process.argv.includes('--controls');
 const compatibilityOnly = process.argv.includes('--compatibility');
-const clusterUi = process.argv.includes('--cluster-ui');
+const voiceOnly = process.argv.includes('--voice');
+const clusterUi = process.argv.includes('--cluster-ui') || voiceOnly;
 const clusterOnly = process.argv.includes('--cluster') || clusterUi;
 const inspectGpu = process.argv.includes('--gpu');
 const gpuProfile = process.argv.find((arg) => arg.startsWith('--gpu-profile='))?.split('=')[1];
@@ -34,9 +48,12 @@ const browserPath =
   ].find(existsSync);
 assert.ok(browserPath, 'Set BROWSER_BIN to an installed Chromium browser executable');
 const profile = await mkdtemp(path.join(os.tmpdir(), 'eigetsu-bitrate-'));
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-let sfu, vite, chrome, ws;
-const edgeProcesses = [];
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+let sfu: import('node:child_process').ChildProcess | undefined;
+let vite: import('vite').ViteDevServer | undefined;
+let chrome: import('node:child_process').ChildProcess | undefined;
+let ws: WebSocket | undefined;
+const edgeProcesses: import('node:child_process').ChildProcess[] = [];
 const clusterSecret = 'local-cluster-test-secret-at-least-32-characters';
 const masterEnv = {
   ...process.env,
@@ -48,24 +65,20 @@ const masterEnv = {
   MEDIASOUP_WORKERS: '2',
   PIPE_LISTEN_IP: '127.0.0.1',
   PIPE_ANNOUNCED_IP: '127.0.0.1',
-  SFU_PUBLIC_URL: '',
-  SITE_ID: 'local',
   CLUSTER_SECRET: clusterSecret,
   ...(clusterOnly
     ? {
         ROLE: 'master',
         SITE_ID: 'a',
         SFU_PUBLIC_URL: 'http://127.0.0.1:13000',
-        CLUSTER_SECRET: clusterSecret,
-        PIPE_ANNOUNCED_IP: '127.0.0.1',
         MASTER_STATE_FILE: path.join(profile, 'master-rooms.json'),
       }
-    : { ROLE: 'standalone', MASTER_STATE_FILE: '' }),
+    : { ROLE: 'standalone', MASTER_STATE_FILE: '', SFU_PUBLIC_URL: '', SITE_ID: 'local' }),
 };
-const edgeEnvs = [];
+const edgeEnvs: NodeJS.ProcessEnv[] = [];
 let browserErrors = '';
 
-async function waitFor(url, select = (value) => value) {
+async function waitFor<T = unknown>(url: string, select: (value: T) => unknown = (value) => value) {
   for (let i = 0; i < 50; i++) {
     try {
       const response = await fetch(url);
@@ -88,13 +101,13 @@ try {
     stdio: ['ignore', 'ignore', 'pipe'],
     env: masterEnv,
   });
-  sfu.stderr.on('data', (chunk) => process.stderr.write(chunk));
+  sfu.stderr!.on('data', (chunk) => process.stderr.write(chunk));
   await waitFor('http://127.0.0.1:13000/health');
   if (clusterOnly) {
     for (const [siteId, port, minPort] of [
       ['b', 13010, 41200],
       ['c', 13020, 41400],
-    ]) {
+    ] as const) {
       const env = {
         ...process.env,
         ROLE: 'sfu',
@@ -170,22 +183,29 @@ try {
   } else browserArgs.push('--disable-gpu');
   if (process.env.BROWSER_NO_SANDBOX === '1') browserArgs.unshift('--no-sandbox');
   chrome = spawn(browserPath, browserArgs, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
-  chrome.stderr.on('data', (chunk) => {
+  chrome.stderr!.on('data', (chunk) => {
     browserErrors = (browserErrors + chunk).slice(-8000);
   });
-  const tab = await waitFor('http://127.0.0.1:19222/json/list', (tabs) =>
+  const tab = await waitFor<DebuggerTab[]>('http://127.0.0.1:19222/json/list', (tabs) =>
     tabs.find((item) => item.type === 'page' && item.url === `http://127.0.0.1:15173${browserPage}`),
+  );
+  assert.ok(
+    tab && typeof tab === 'object' && 'webSocketDebuggerUrl' in tab && typeof tab.webSocketDebuggerUrl === 'string',
   );
   ws = new WebSocket(tab.webSocketDebuggerUrl.replace('localhost', '127.0.0.1'));
   await once(ws, 'open');
   let id = 0;
-  const pending = new Map();
+  const pending = new Map<number, (response: CdpResponse) => void>();
   ws.onmessage = (event) => {
-    const result = JSON.parse(event.data);
+    const result: CdpResponse = JSON.parse(event.data);
     pending.get(result.id)?.(result);
   };
-  const command = (method, params = {}, sessionId) =>
-    new Promise((resolve, reject) => {
+  const command: BrowserHarness['command'] = <M extends keyof CdpResults>(
+    method: M,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+  ) =>
+    new Promise<CdpResults[M]>((resolve, reject) => {
       const requestId = ++id;
       const timer = setTimeout(() => {
         pending.delete(requestId);
@@ -195,11 +215,14 @@ try {
         clearTimeout(timer);
         pending.delete(requestId);
         if (response.error) reject(new Error(JSON.stringify(response.error)));
-        else resolve(response.result);
+        else resolve(response.result as CdpResults[M]);
       });
-      ws.send(JSON.stringify({ id: requestId, method, params, ...(sessionId ? { sessionId } : {}) }));
+      ws!.send(JSON.stringify({ id: requestId, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
-  const evaluate = async (expression, sessionId) => {
+  const evaluate: BrowserHarness['evaluate'] = async <T = unknown>(
+    expression: string,
+    sessionId?: string,
+  ): Promise<T> => {
     const result = await command(
       'Runtime.evaluate',
       { expression, awaitPromise: true, returnByValue: true, userGesture: true },
@@ -207,14 +230,14 @@ try {
     );
     if (result.exceptionDetails)
       throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-    return result.result.value;
+    return result.result.value as T;
   };
   if (inspectGpu) {
     const version = await (await fetch('http://127.0.0.1:19222/json/version')).json();
     const browserSocket = new WebSocket(version.webSocketDebuggerUrl.replace('localhost', '127.0.0.1'));
     try {
       await once(browserSocket, 'open');
-      const response = new Promise((resolve, reject) => {
+      const response = new Promise<GpuInfo>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('GPU information timed out')), 15000);
         browserSocket.onmessage = (event) => {
           const message = JSON.parse(event.data);
@@ -235,8 +258,13 @@ try {
     }
   }
   if (clusterUi) {
-    const { runClusterUiCheck } = await import('./cluster-ui-browser.ts');
-    await runClusterUiCheck({ evaluate, command });
+    if (voiceOnly) {
+      const { runVoiceCheck } = await import('./voice-browser.ts');
+      await runVoiceCheck({ evaluate, command, root });
+    } else {
+      const { runClusterUiCheck } = await import('./cluster-ui-browser.ts');
+      await runClusterUiCheck({ evaluate, command });
+    }
   }
   if (controlsOnly) {
     const { runPlayerControlsCheck } = await import('./player-controls-browser.ts');
@@ -249,8 +277,10 @@ try {
   }
   if (clusterOnly && !clusterUi) console.log('Cluster:', JSON.stringify(await evaluate('window.runClusterCheck()')));
   if (audioOnly || (clusterOnly && !clusterUi)) {
-    const result = await evaluate(clusterOnly ? 'window.runAudioCheck(13010, 13000)' : 'window.runAudioCheck()');
-    const mean = (samples) =>
+    const result = await evaluate<Awaited<ReturnType<typeof runAudioCheck>>>(
+      clusterOnly ? 'window.runAudioCheck(13010, 13000)' : 'window.runAudioCheck()',
+    );
+    const mean = (samples: number[][]) =>
       [0, 1].map((channel) => samples.reduce((sum, sample) => sum + sample[channel], 0) / samples.length);
     const full = mean(result.full);
     if (full.some((value) => value === 0)) console.log(JSON.stringify(result.debug));
@@ -266,7 +296,7 @@ try {
         ['full', result.full],
         ['half', result.half],
         ['quarter', result.quarter],
-      ]) {
+      ] as const) {
         const average = mean(samples)[channel];
         assert.ok(
           samples.every((sample) => Math.abs(sample[channel] / average - 1) < 0.08),
@@ -294,6 +324,7 @@ try {
     assert.equal(result.sampleRate, 48_000);
     assert.equal(result.codec.clockRate, 48_000);
     assert.equal(result.codec.channels, 2);
+    assert.ok(result.codec.sdpFmtpLine, 'Opus codec parameters are unavailable');
     for (const parameter of ['stereo=1', 'maxaveragebitrate=256000', 'maxplaybackrate=48000', 'usedtx=0']) {
       assert.ok(
         result.codec.sdpFmtpLine
@@ -316,13 +347,13 @@ try {
     );
   }
   if (clusterOnly && !clusterUi) {
-    const recoveryRoom = await evaluate('window.runClusterCheck(true)');
-    const before = await evaluate('window.clusterRecovery.frames()');
+    const recoveryRoom = await evaluate<{ roomId: string }>('window.runClusterCheck(true)');
+    const before = await evaluate<number>('window.clusterRecovery.frames()');
     let exited = once(sfu, 'exit');
     sfu.kill();
     await exited;
     await delay(1500);
-    const during = await evaluate('window.clusterRecovery.frames()');
+    const during = await evaluate<number>('window.clusterRecovery.frames()');
     assert.ok(during > before, 'Edge-to-edge video stopped when the master stopped');
     sfu = spawn(process.execPath, ['sfu/index.ts'], {
       cwd: root,
@@ -330,12 +361,12 @@ try {
       stdio: ['ignore', 'ignore', 'pipe'],
       env: masterEnv,
     });
-    sfu.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    sfu.stderr!.on('data', (chunk) => process.stderr.write(chunk));
     await waitFor('http://127.0.0.1:13000/health');
-    await waitFor('http://127.0.0.1:13000/sfu/sites', (sites) => sites.length === 3);
+    await waitFor<unknown[]>('http://127.0.0.1:13000/sfu/sites', (sites) => sites.length === 3);
     await delay(1500);
     assert.ok(
-      (await evaluate('window.clusterRecovery.frames()')) > during,
+      (await evaluate<number>('window.clusterRecovery.frames()')) > during,
       'Existing media did not survive master recovery',
     );
     console.log('Cluster: master restart restored metadata while edge-to-edge video continued');
@@ -377,7 +408,7 @@ try {
         sessionId,
       );
       await command('Page.navigate', { url: `http://127.0.0.1:15173/?room=${recoveryRoom.roomId}` }, sessionId);
-      const waitPage = async (expression) => {
+      const waitPage = async (expression: string) => {
         for (let i = 0; i < 100; i++) {
           if (await evaluate(expression, sessionId)) return;
           await delay(100);
@@ -400,11 +431,11 @@ try {
       await mkdir(path.join(root, 'tmp'), { recursive: true });
       const roomScreenshot = await command('Page.captureScreenshot', { captureBeyondViewport: true }, sessionId);
       await writeFile(path.join(root, 'tmp/sfu-connection.png'), Buffer.from(roomScreenshot.data, 'base64'));
-      const statistics = await (await fetch('http://127.0.0.1:13010/sfu/statistics')).json();
+      const statistics: ClusterStatistics = await (await fetch('http://127.0.0.1:13010/sfu/statistics')).json();
       assert.equal(statistics.sites.length, 3);
-      assert.ok(statistics.sites.every((site) => site.status === 'online' && site.metrics.workers.length === 2));
-      assert.ok(statistics.sites.find((site) => site.id === 'b').metrics.clients.bytesSent > 0);
-      assert.ok(statistics.sites.find((site) => site.id === 'c').metrics.pipes.bytesSent > 0);
+      assert.ok(statistics.sites.every((site) => site.status === 'online' && site.metrics?.workers.length === 2));
+      assert.ok((statistics.sites.find((site) => site.id === 'b')?.metrics?.clients.bytesSent ?? 0) > 0);
+      assert.ok((statistics.sites.find((site) => site.id === 'c')?.metrics?.pipes.bytesSent ?? 0) > 0);
       const dashboard = await command('Target.createTarget', { url: 'http://127.0.0.1:15173/cluster' });
       try {
         const { sessionId: dashboardSession } = await command('Target.attachToTarget', {
@@ -485,7 +516,7 @@ try {
       edgeProcesses[0] = restarted;
       restarted.stderr.on('data', (chunk) => process.stderr.write(chunk));
       await waitFor('http://127.0.0.1:13010/health');
-      await waitFor('http://127.0.0.1:13000/internal/rooms', (rooms) =>
+      await waitFor<ListedRoom[]>('http://127.0.0.1:13000/internal/rooms', (rooms) =>
         rooms.some((room) => room.id === applicationRoom && room.peopleCount === 2),
       );
       await waitPage(
@@ -515,8 +546,9 @@ try {
           ['fixed-multiple', '1440p60'],
         ]) {
     const preset = qualityPresets.find((item) => item.id === presetId);
+    assert.ok(preset, 'Unknown quality preset');
     const budgetMbps = preset.bitrate / 1_000_000;
-    const result = await evaluate(
+    const result = await evaluate<Awaited<ReturnType<typeof runBitrateCheck>>>(
       `window.runBitrateCheck('${mode}', '${presetId}', ${inspectGpu}, ${JSON.stringify(gpuProfile)})`,
     );
     const targets = result.samples.map((sample) => sample.targetMbps);
@@ -543,13 +575,14 @@ try {
       `${mode}/${presetId}: received resolution changed: ${JSON.stringify(result.samples)}`,
     );
     {
-      assert.equal(result.receiver?.codec?.toLowerCase(), 'video/h264');
+      assert.ok(result.receiver?.stats, 'Receiver statistics missing');
+      assert.equal(result.receiver.codec?.toLowerCase(), 'video/h264');
       assert.ok(result.receiver.framesDecoded > 0, 'The browser did not decode the SFU H.264 stream');
       assert.ok(result.receiver.renderedFrames > 0, 'The browser did not render the SFU H.264 stream');
       assert.equal(result.receiver.bufferTargetMs, 100);
-      assert.ok(result.receiver.stats.fps > 0, 'Receiver FPS was not measured');
-      assert.ok(result.receiver.stats.decodeMs > 0, 'Receiver decode time was not measured');
-      assert.ok(result.receiver.stats.bufferMs > 0, 'Receiver buffer delay was not measured');
+      assert.ok((result.receiver.stats.fps ?? 0) > 0, 'Receiver FPS was not measured');
+      assert.ok((result.receiver.stats.decodeMs ?? 0) > 0, 'Receiver decode time was not measured');
+      assert.ok((result.receiver.stats.bufferMs ?? 0) > 0, 'Receiver buffer delay was not measured');
       console.log(
         `H.264 receiver: fixed ${preset.width}x${preset.height}, ${result.receiver.framesDecoded} decoded frames, ${result.receiver.renderedFrames} playback frames`,
       );

@@ -1,13 +1,16 @@
 import { Device } from 'mediasoup-client';
-import { io } from 'socket.io-client';
-import { produceScreenShareVideo } from '/src/screen-share-quality.ts';
+import { io, type Socket } from 'socket.io-client';
+import { createRpc, check } from './browser-rpc.ts';
+import type { BrowserPeer } from './browser-rpc.ts';
+import type { Producer, Transport, ShareAppData } from '../src/types.ts';
+import { produceScreenShareVideo } from '../src/screen-share-quality.ts';
 
-window.runClusterCheck = async (keepForRecovery = false) => {
-  const sockets = [],
-    transports = [],
-    videos = [],
-    producers = [];
-  let paintTimer;
+export const runClusterCheck = async (keepForRecovery = false) => {
+  const sockets: Socket[] = [];
+  const transports: Transport[] = [];
+  const videos: HTMLVideoElement[] = [];
+  const producers: Producer[] = [];
+  let paintTimer: ReturnType<typeof setInterval> | undefined;
   let retained = false;
   const cleanup = () => {
     clearInterval(paintTimer);
@@ -20,41 +23,36 @@ window.runClusterCheck = async (keepForRecovery = false) => {
     for (const item of transports) item.close();
     for (const socket of sockets) socket.disconnect();
   };
-  const assert = (value, message) => {
+  const assert = (value: unknown, message: string) => {
     if (!value) throw new Error(message);
   };
-  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const wait = async (check) => {
+  const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const wait = async (check: () => boolean | Promise<boolean>) => {
     for (let i = 0; i < 100; i++) {
       if (await check()) return;
       await delay(100);
     }
     throw new Error('Cluster condition timed out');
   };
-  const diagnostics = (site) => fetch(`/__cluster/${site}/cluster`).then((response) => response.json());
-  const connect = async (port) => {
+  const diagnostics = (site: string) => fetch(`/__cluster/${site}/cluster`).then((response) => response.json());
+  const connect = async (port: number) => {
     const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'], reconnection: false });
     sockets.push(socket);
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('connect_error', reject);
     });
-    const rpc = (event, payload = {}) =>
-      new Promise((resolve, reject) => {
-        socket.timeout(18000).emit(event, ...(event === 'room:sync' ? [] : [payload]), (error, result) => {
-          if (error || !result?.ok) reject(error || new Error(result?.error));
-          else resolve(result);
-        });
-      });
+    const rpc = createRpc(socket, 18000);
     return { socket, rpc, device: new Device() };
   };
-  const transport = async (peer, direction, producerId) => {
+  const transport = async (peer: BrowserPeer, direction: 'send' | 'recv', producerId?: string) => {
     const info = await peer.rpc('transport:create', {
       direction,
       producerId,
       newShare: direction === 'send' && !producerId,
     });
-    const result = peer.device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
+    const result =
+      peer.device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport']<ShareAppData>(info);
     transports.push(result);
     result.on('connect', ({ dtlsParameters }, ok, fail) =>
       peer.rpc('transport:connect', { transportId: result.id, dtlsParameters }).then(ok, fail),
@@ -64,7 +62,7 @@ window.runClusterCheck = async (keepForRecovery = false) => {
     );
     return result;
   };
-  const consume = async (peer, producerId) => {
+  const consume = async (peer: BrowserPeer, producerId: string) => {
     const receiver = await transport(peer, 'recv', producerId);
     const info = await peer.rpc('consume', {
       transportId: receiver.id,
@@ -94,24 +92,25 @@ window.runClusterCheck = async (keepForRecovery = false) => {
       assert(joined.roomName === room.roomName, 'Master did not preserve room name across sites');
       await viewer.device.load({ routerRtpCapabilities: joined.rtpCapabilities });
     }
-    const listed = await (await fetch('/__cluster/a/rooms')).json();
+    const listed: import('../src/types.ts').ListedRoom[] = await (await fetch('/__cluster/a/rooms')).json();
     assert(listed.find((item) => item.id === room.roomId)?.peopleCount === 4, 'Master did not aggregate participants');
     assert((await sender.rpc('room:sync')).peers.length === 3, 'Source cannot discover remote peers');
     const canvas = document.createElement('canvas');
     canvas.width = 640;
     canvas.height = 360;
     const context = canvas.getContext('2d');
+    check(context, 'Canvas 2D is unavailable');
     let frame = 0;
     paintTimer = setInterval(() => {
       context.fillStyle = `hsl(${frame++ * 7},80%,50%)`;
       context.fillRect(0, 0, 640, 360);
     }, 33);
-    const publish = async (peer) => {
+    const publish = async (peer: BrowserPeer) => {
       const track = canvas.captureStream(30).getVideoTracks()[0];
       const result = await produceScreenShareVideo(
         () => transport(peer, 'send'),
         track,
-        { bitrate: 1_500_000, fps: 30 },
+        { id: 'cluster', label: 'Cluster', width: 640, height: 360, bitrate: 1_500_000, fps: 30 },
         { label: 'cluster-video' },
         peer.device.sendRtpCapabilities,
       );
@@ -197,3 +196,5 @@ window.runClusterCheck = async (keepForRecovery = false) => {
     if (!retained) cleanup();
   }
 };
+
+window.runClusterCheck = runClusterCheck;

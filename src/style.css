@@ -132,6 +132,7 @@
 }
 @media (prefers-color-scheme: light) {
   .sfu-connection,
+  .voice-chat,
   .cluster-page {
     --panel: #fff;
     --line: #dce3e7;
@@ -2138,4 +2139,45 @@ body {
   .focus-window [data-player-controls] {
     transition: none;
   }
+}
+/* Voice streams stay mounted when a screen is focused. */
+.voice-chat {
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 12px;
+  font-size: 12px;
+}
+.voice-chat button {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+}
+.voice-chat button:hover {
+  border-color: var(--teal);
+}
+.voice-chat button:disabled {
+  opacity: 0.5;
+}
+.voice-chat-header,
+.voice-stream {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.voice-chat-note {
+  color: var(--muted);
+}
+.voice-stream {
+  padding-top: 10px;
+}
+.voice-stream label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }

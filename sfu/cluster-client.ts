@@ -89,7 +89,7 @@ export class ClusterClient {
   }
 
   async request<T = unknown>(request: ControlRequest): Promise<T> {
-    if (['join', 'leave', 'publish', 'unpublish'].includes(request.action)) this.revision++;
+    if (['join', 'leave', 'publish', 'unpublish', 'voice'].includes(request.action)) this.revision++;
     if (!this.ready) throw new Error('ルーム管理サーバーに接続できません');
     return this.send<T>(request);
   }

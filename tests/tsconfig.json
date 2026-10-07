@@ -5,7 +5,8 @@
     "moduleResolution": "NodeNext",
     "noEmit": true,
     "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
     "types": ["node"]
   },
-  "include": ["*.test.ts"]
+  "include": ["**/*.ts"]
 }

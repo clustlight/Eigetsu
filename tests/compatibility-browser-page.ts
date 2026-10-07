@@ -1,51 +1,47 @@
 import { Device } from 'mediasoup-client';
-import { io } from 'socket.io-client';
-import { createCompatibleVideoSender } from '/src/compatible-video.ts';
-import { produceScreenShareVideo } from '/src/screen-share-quality.ts';
+import { io, type Socket } from 'socket.io-client';
+import { createRpc, check } from './browser-rpc.ts';
+import type { BrowserPeer } from './browser-rpc.ts';
+import type { Transport, ShareAppData, ProducerAnnouncement } from '../src/types.ts';
+import { createCompatibleVideoSender } from '../src/compatible-video.ts';
+import { produceScreenShareVideo } from '../src/screen-share-quality.ts';
 
-window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 13000, viewerPort = 13000) => {
-  const sockets = [],
-    transports = [],
-    playbacks = [];
-  let video, manager, camera, paintTimer;
-  const assert = (condition, message) => {
+export const runCompatibilityCheck = async (inspectHardware = false, senderPort = 13000, viewerPort = 13000) => {
+  const sockets: Socket[] = [];
+  const transports: Transport[] = [];
+  const playbacks: HTMLVideoElement[] = [];
+  let video: Awaited<ReturnType<typeof produceScreenShareVideo>> | undefined;
+  let manager: ReturnType<typeof createCompatibleVideoSender> | undefined;
+  let camera: MediaStream | undefined;
+  let paintTimer: ReturnType<typeof setInterval> | undefined;
+  const assert = (condition: unknown, message: string) => {
     if (!condition) throw new Error(message);
   };
-  const waitFor = async (check) => {
+  const waitFor = async (check: () => boolean | Promise<boolean>) => {
     for (let i = 0; i < 150; i++) {
       if (await check()) return;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     throw new Error('Compatibility check timed out');
   };
-  const connect = async (port) => {
+  const connect = async (port: number) => {
     const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
     sockets.push(socket);
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('connect_error', reject);
     });
-    const rpc = (event, payload = {}) =>
-      new Promise((resolve, reject) =>
-        socket
-          .timeout(15000)
-          .emit(event, ...(event === 'room:sync' ? [] : [payload]), (error, response) =>
-            error
-              ? reject(new Error(`${event}: ${error.message}`))
-              : response.ok
-                ? resolve(response)
-                : reject(new Error(`${event}: ${response.error}`)),
-          ),
-      );
-    return { socket, rpc };
+    const rpc = createRpc(socket);
+    return { socket, rpc, device: new Device() };
   };
-  const createTransport = async (peer, direction, producerId) => {
+  const createTransport = async (peer: BrowserPeer, direction: 'send' | 'recv', producerId?: string) => {
     const info = await peer.rpc('transport:create', {
       direction,
       producerId,
       newShare: direction === 'send' && !producerId,
     });
-    const transport = peer.device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
+    const transport =
+      peer.device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport']<ShareAppData>(info);
     transports.push(transport);
     transport.observer.once('close', () => peer.socket.emit('transport:close', { transportId: transport.id }));
     transport.on('connect', ({ dtlsParameters }, ok, fail) =>
@@ -58,7 +54,11 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
     );
     return transport;
   };
-  const receive = async (peer, info, transport) => {
+  const receive = async (
+    peer: BrowserPeer,
+    info: import('../src/types.ts').RpcResponses['consume'],
+    transport: Transport,
+  ) => {
     const consumer = await transport.consume(info);
     const element = document.createElement('video');
     element.muted = true;
@@ -83,9 +83,10 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
     await viewer.rpc('room:join', { roomId: room.roomId, name: 'baseline-viewer' });
     // Emulate the negotiated intersection for an iOS receiver that advertises
     // 42e0 / 640c, while this router publishes 42e0 / 4d00 / 6400.
-    const codecs = room.rtpCapabilities.codecs.filter(
+    const codecs = (room.rtpCapabilities.codecs || []).filter(
       (codec) =>
-        codec.mimeType.toLowerCase() === 'video/h264' && /^42e0/i.test(codec.parameters?.['profile-level-id'] || ''),
+        codec.mimeType.toLowerCase() === 'video/h264' &&
+        /^42e0/i.test(String(codec.parameters?.['profile-level-id'] || '')),
     );
     const payloads = new Set(codecs.map((codec) => codec.preferredPayloadType));
     viewer.device = new Device();
@@ -94,15 +95,15 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
         ...room.rtpCapabilities,
         codecs: [
           ...codecs,
-          ...room.rtpCapabilities.codecs.filter(
-            (codec) => codec.mimeType.toLowerCase() === 'video/rtx' && payloads.has(codec.parameters.apt),
+          ...(room.rtpCapabilities.codecs || []).filter(
+            (codec) => codec.mimeType.toLowerCase() === 'video/rtx' && payloads.has(Number(codec.parameters?.apt)),
           ),
         ],
       },
     });
     let compatibilityRequests = 0,
       compatibilityActive = false;
-    const announced = [];
+    const announced: ProducerAnnouncement[] = [];
     viewer.socket.on('producer:new', (data) => announced.push(data));
     manager = createCompatibleVideoSender({
       getProducer: (id) => (video?.producer.id === id ? video.producer : undefined),
@@ -114,13 +115,14 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
     });
     sender.socket.on('producer:compatibility-request', (request, reply) => {
       compatibilityRequests++;
-      manager.request(request, reply);
+      manager?.request(request, reply);
     });
-    sender.socket.on('producer:compatibility-stop', ({ producerId }) => manager.stop(producerId));
+    sender.socket.on('producer:compatibility-stop', ({ producerId }) => manager?.stop(producerId));
     const canvas = document.createElement('canvas');
     canvas.width = 1920;
     canvas.height = 1080;
     const paint = canvas.getContext('2d');
+    check(paint, 'Canvas 2D is unavailable');
     let frame = 0;
     paintTimer = setInterval(() => {
       paint.fillStyle = `hsl(${frame++ * 4},80%,50%)`;
@@ -130,12 +132,12 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
     video = await produceScreenShareVideo(
       () => createTransport(sender, 'send'),
       track,
-      { bitrate: 8_000_000, fps: 30 },
+      { id: 'compatibility', label: 'Compatibility', width: 1920, height: 1080, bitrate: 8_000_000, fps: 30 },
       { compatibilitySupported: true, profile: '1080p30' },
       sender.device.sendRtpCapabilities,
     );
     assert(
-      /^4d00/i.test(video.producer.rtpParameters.codecs[0].parameters['profile-level-id']),
+      /^4d00/i.test(String(video.producer.rtpParameters.codecs[0].parameters?.['profile-level-id'] || '')),
       'Test requires a Main-profile primary stream',
     );
     const normalTransport = await createTransport(sender, 'recv', video.producer.id);
@@ -157,7 +159,7 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
       receiveTransports.map((transport) =>
         viewer.rpc('consume', {
           transportId: transport.id,
-          producerId: video.producer.id,
+          producerId: video!.producer.id,
           rtpCapabilities: viewer.device.recvRtpCapabilities,
         }),
       ),
@@ -168,7 +170,7 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
       'Viewers must share one compatible producer',
     );
     assert(
-      /^42e0/i.test(infos[0].rtpParameters.codecs[0].parameters['profile-level-id']),
+      /^42e0/i.test(String(infos[0].rtpParameters.codecs[0].parameters?.['profile-level-id'] || '')),
       'Fallback must actually negotiate Constrained Baseline',
     );
     const consumers = await Promise.all(infos.map((info, index) => receive(viewer, info, receiveTransports[index])));
@@ -201,7 +203,7 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
       compatibilityRequests === 2 && again.producerId !== infos[0].producerId,
       'Returning viewer must recreate the idle fallback',
     );
-    const closed = new Promise((resolve) => viewer.socket.once('producer:closed', resolve));
+    const closed = new Promise<{ producerId: string }>((resolve) => viewer.socket.once('producer:closed', resolve));
     sender.socket.emit('producer:close', { producerId: video.producer.id });
     video.producer.close();
     const event = await closed;
@@ -230,3 +232,5 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
     camera?.getTracks().forEach((track) => track.stop());
   }
 };
+
+window.runCompatibilityCheck = runCompatibilityCheck;

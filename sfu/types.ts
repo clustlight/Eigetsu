@@ -2,6 +2,7 @@ import type { types as Media } from 'mediasoup';
 import type { ShareRouting } from './share-routing.ts';
 
 export interface ShareAppData extends Record<string, unknown> {
+  voiceChat?: boolean;
   ownerId?: string;
   label?: string;
   profile?: string;
@@ -36,6 +37,7 @@ export interface Room {
 }
 type Ack = (value: { ok: boolean; error?: string; [key: string]: unknown }) => void;
 export interface ClientEvents {
+  'room:voice': (data: { enabled: boolean }, reply: Ack) => void;
   'connection:ping': (reply: (value: { ready: boolean }) => void) => void;
   'room:create': (data: { name: string }, reply: Ack) => void;
   'room:join': (data: { roomId: string; name: string }, reply: Ack) => void;
@@ -67,6 +69,7 @@ export interface PeerInfo {
   shares: { id: string; kind: Media.MediaKind; profile?: string; label: string; appData: ShareAppData }[];
 }
 export interface ServerEvents {
+  'room:voice': (data: { voiceChatEnabled: boolean }) => void;
   'peer:joined': (peer: PeerInfo) => void;
   'peer:left': (data: { peerId: string }) => void;
   'producer:new': (data: {

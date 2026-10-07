@@ -16,6 +16,7 @@ export interface LobbyProps {
   noticeError: boolean;
 }
 export interface RoomViewProps extends AudioControls {
+  voiceChat: ReactNode;
   connectionInfo: ReactNode;
   room: Room;
   shares: Share[];

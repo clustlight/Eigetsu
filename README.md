@@ -114,4 +114,9 @@ Set `MEDIASOUP_WORKERS=2` (or another count up to the available CPU cores) to en
 
 Shared audio uses a separate stereo audio track. The sender can adjust or mute the audio for everyone; each viewer controls their own playback volume and mute state.
 
+Voice chat (VC) is off by default for each new room. Any room participant can enable or disable it for the entire room; the setting is synchronized across SFUs and retained with room metadata. Enabling VC allows listening, and each participant explicitly starts their microphone. Each microphone is one independent audio stream with its own routed transport and worker allocation, without a screen or dummy video. The VC panel stays active while a screen is expanded; screen popout windows do not receive duplicate VC playback.
+
+VC requests no echo cancellation, noise suppression, or automatic gain control, uses the same music hint and Opus settings as shared screen audio, and disables Opus DTX. Each participant can mute or stop their microphone, and listeners can mute or adjust each voice stream separately. Disabling room VC stops all microphones and releases VC streams without interrupting screen sharing. Microphones must be started again after re-enabling VC or reconnecting.
+
 Run `npm run test:bitrate` to check video sending and playback, `npm run test:audio` for audio, and `npm run test:controls` for room and player controls.
+Run `npm run test:voice` for VC UI and bidirectional audio across separate SFUs, including room-wide disable and coexistence with screen sharing.

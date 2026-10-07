@@ -42,6 +42,7 @@ import {
 } from './screen-share-receive.ts';
 import { ClusterStatisticsPage, SfuConnectionInfo } from './sfu-monitor.tsx';
 import { recoverVideoFrame } from './video-frame-recovery.ts';
+import { VoiceChatSession, type VoiceState } from './voice-chat.ts';
 import './style.css';
 
 const params = new URLSearchParams(location.search);
@@ -280,6 +281,7 @@ function StreamQuality({ share }: { share: Share }) {
 }
 
 function disposeMedia(current: Connection, shares: Map<string, Share>) {
+  current.voiceChat?.close();
   current.compatibleSender?.close();
   for (const transport of current.transports) transport.close();
   for (const share of shares.values()) {
@@ -298,6 +300,8 @@ function App() {
   const [rooms, setRooms] = useState<ListedRoom[]>([]);
   const [room, setRoom] = useState<Room | null>(null);
   const [shares, setShares] = useState<Share[]>([]);
+  const [voice, setVoice] = useState<VoiceState>({ enabled: false, starting: false, streams: [] });
+  const [voiceSettingPending, setVoiceSettingPending] = useState(false);
   const [notice, setNotice] = useState('');
   const [noticeError, setNoticeError] = useState(false);
   const [focusedId, setFocusedId] = useState<string | null>(null);
@@ -398,6 +402,16 @@ function App() {
       }
 
       async function initialize(socket: Socket, site: SfuSelection) {
+        let latestVoice: boolean | undefined;
+        let voiceRevision = 0;
+        const voiceRef: { current?: VoiceChatSession } = {};
+        socket.on('room:voice', ({ voiceChatEnabled }: { voiceChatEnabled: boolean }) => {
+          if (epoch !== connectionEpoch.current) return;
+          latestVoice = voiceChatEnabled === true;
+          ++voiceRevision;
+          voiceRef.current?.setEnabled(latestVoice);
+          setRoom((current) => (current ? { ...current, voiceChatEnabled: latestVoice === true } : current));
+        });
         const pendingProducerEvents: ProducerAnnouncement[] = [];
         const closedProducers = new Set<string>();
         let handleProducerNew: ((data: ProducerAnnouncement) => void) | null = null;
@@ -471,6 +485,19 @@ function App() {
           displayName: displayName.trim() || 'ゲスト',
           peerIds: new Set([socket.id!]),
         };
+        const voiceSession = new VoiceChatSession({
+          peerId: socket.id!,
+          name: displayName.trim() || 'ゲスト',
+          clientId,
+          createSendTransport: (producerId) => createTransport('send', producerId),
+          closeProducer: (producerId) => socket.emit('producer:close', { producerId }),
+          onChange: (state) => {
+            if (epoch === connectionEpoch.current) setVoice(state);
+          },
+        });
+        connection.current.voiceChat = voiceSession;
+        voiceRef.current = voiceSession;
+        voiceSession.setEnabled(latestVoice ?? response.voiceChatEnabled);
         const compatibleSender = createCompatibleVideoSender({
           getProducer: (id) => shareMap.current.get(id)?.producer,
           createTransport: (producerId) => createTransport('send', producerId),
@@ -509,7 +536,13 @@ function App() {
           kind: Media.MediaKind = 'video',
           appData: ShareAppData = {},
         ) => {
-          if (closedProducers.has(producerId) || shareMap.current.has(producerId) || subscribing.has(producerId))
+          if (appData.voiceChat && (focusProducer || appData.clientId === clientId)) return;
+          if (
+            closedProducers.has(producerId) ||
+            shareMap.current.has(producerId) ||
+            voiceSession.has(producerId) ||
+            subscribing.has(producerId)
+          )
             return;
           subscribing.add(producerId);
           let consumer: Consumer | undefined;
@@ -601,7 +634,9 @@ function App() {
                 }
               }, 3000);
             }
-            if (kind === 'audio') {
+            if (kind === 'audio' && appData.voiceChat) {
+              voiceSession.addRemote(consumer, recvTransport, peerId, peerName);
+            } else if (kind === 'audio') {
               const parentId = appData.videoProducerId;
               if (!parentId) throw new Error('Audio producer has no video source');
               const share = shareMap.current.get(parentId);
@@ -665,11 +700,14 @@ function App() {
             if (producerId === focusProducer) setConnectionError(`配信を受信できません: ${errorMessage(error)}`);
             else if (kind === 'video')
               showNotice(`${peerName || '参加者'}の画面を受信できません: ${errorMessage(error)}`, true);
+            else if (appData.voiceChat)
+              showNotice(`${peerName || '参加者'}のVCを受信できません: ${errorMessage(error)}`, true);
           } finally {
             subscribing.delete(producerId);
           }
         };
         const removeShare = (producerId: string, peerId?: string) => {
+          voiceSession.remove(producerId);
           const share = shareMap.current.get(producerId);
           if (!share) {
             for (const parent of shareMap.current.values()) {
@@ -701,14 +739,20 @@ function App() {
         handleProducerClosed = removeShare;
         socket.on('peer:left', ({ peerId }) => {
           if (connection.current?.socket !== socket) return;
+          voiceSession.removePeer(peerId);
           connection.current?.peerIds.delete(peerId);
           setRoom((current) => (current ? { ...current, people: connection.current?.peerIds.size || 0 } : current));
           for (const [producerId, share] of shareMap.current)
             if (share.peerId === peerId) removeShare(producerId, peerId);
         });
         socket.on('connect_error', (error) => showNotice(`接続エラー: ${errorMessage(error)}`, true));
+        const syncVoiceRevision = voiceRevision;
         const synchronized = await rpc(socket, 'room:sync', {});
         if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
+        if (syncVoiceRevision === voiceRevision) {
+          latestVoice = synchronized.voiceChatEnabled === true;
+          voiceSession.setEnabled(latestVoice);
+        }
         connection.current.peerIds = new Set([socket.id!, ...synchronized.peers.map((peer) => peer.id)]);
         for (const peer of synchronized.peers) {
           if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
@@ -717,6 +761,7 @@ function App() {
         }
         if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
         setRoom({
+          voiceChatEnabled: latestVoice === true,
           id: response.roomId,
           name: response.roomName || '配信ルーム',
           people: connection.current?.peerIds.size || 0,
@@ -959,6 +1004,7 @@ function App() {
     current?.socket.disconnect();
     shareMap.current.clear();
     setShares([]);
+    setVoice({ enabled: false, starting: false, streams: [] });
     setRoom(null);
     setConnecting(false);
     history.replaceState(null, '', location.pathname);
@@ -990,6 +1036,19 @@ function App() {
     if (!room) return;
     await navigator.clipboard.writeText(`${location.origin}?room=${room.id}`);
     showNotice('招待リンクをコピーしました');
+  };
+
+  const toggleRoomVoice = async () => {
+    const current = connection.current;
+    if (!current || voiceSettingPending) return;
+    setVoiceSettingPending(true);
+    try {
+      await rpc(current.socket, 'room:voice', { enabled: !voice.enabled });
+    } catch (error) {
+      showNotice(`VCを切り替えられません: ${errorMessage(error)}`, true);
+    } finally {
+      setVoiceSettingPending(false);
+    }
   };
 
   if (connecting && !room) return <div className="boot-screen">ルームに接続しています…</div>;
@@ -1030,6 +1089,63 @@ function App() {
 
   return (
     <RoomView
+      voiceChat={
+        <section className="voice-chat" aria-label="ボイスチャット">
+          <div className="voice-chat-header">
+            <strong>VC · {voice.enabled ? 'オン' : 'オフ'}</strong>
+            <button
+              aria-pressed={voice.enabled}
+              disabled={voiceSettingPending || !connection.current}
+              onClick={toggleRoomVoice}
+            >
+              {voice.enabled ? 'ルームのVCを無効にする' : 'ルームのVCを有効にする'}
+            </button>
+            {voice.enabled && !voice.streams.some((stream) => stream.local) && (
+              <button
+                disabled={voice.starting || !connection.current}
+                onClick={() => {
+                  void connection.current?.voiceChat
+                    ?.start()
+                    .catch((error) => showNotice(`マイクを開始できません: ${errorMessage(error)}`, true));
+                }}
+              >
+                {voice.starting ? 'マイクを準備中…' : 'マイクを開始'}
+              </button>
+            )}
+            {voice.enabled && <span>{voice.streams.length} ストリーム</span>}
+          </div>
+          {voice.enabled && <p className="voice-chat-note">エコー除去・ノイズ抑制・自動音量調整はオフです。</p>}
+          {voice.streams.map((stream) => (
+            <div className="voice-stream" key={stream.id} data-voice-stream={stream.id}>
+              <span>
+                {stream.name}
+                {stream.local ? '（自分）' : ''}
+              </span>
+              {!stream.local && <AudioOutput track={stream.track} volume={stream.volume} muted={stream.muted} />}
+              <button aria-pressed={stream.muted} onClick={() => connection.current?.voiceChat?.toggleMute(stream.id)}>
+                {stream.muted ? 'ミュート解除' : 'ミュート'}
+              </button>
+              {stream.local ? (
+                <button onClick={() => connection.current?.voiceChat?.remove(stream.id)}>マイクを停止</button>
+              ) : (
+                <label>
+                  音量{' '}
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={Math.round(stream.volume * 100)}
+                    aria-label={`${stream.name}のVC音量`}
+                    onChange={(event) =>
+                      connection.current?.voiceChat?.setVolume(stream.id, Number(event.target.value) / 100)
+                    }
+                  />
+                </label>
+              )}
+            </div>
+          ))}
+        </section>
+      }
       connectionInfo={<SfuConnectionInfo site={connectedSite} getConnection={getConnection} />}
       room={room}
       shares={visibleShares}
@@ -1143,6 +1259,7 @@ function FloatingDiagnostics({ share, onClose }: { share: Share; onClose(): void
 }
 
 function RoomView({
+  voiceChat,
   connectionInfo,
   room,
   shares,
@@ -1204,6 +1321,7 @@ function RoomView({
         </div>
       </div>
       {connectionInfo}
+      {voiceChat}
       <div className="room-toolbar">
         <div className="toolbar-label">
           画面 <span className="count-pill">{focused ? allShareCount : shares.length}</span>

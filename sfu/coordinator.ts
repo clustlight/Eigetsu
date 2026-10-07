@@ -36,6 +36,7 @@ export class Coordinator {
         throw new Error('Invalid master state file');
       for (const room of saved.rooms) {
         if (typeof room.id !== 'string' || typeof room.name !== 'string') throw new Error('Invalid master state file');
+        room.voiceChatEnabled = room.voiceChatEnabled === true;
         this.rooms.set(room.id, room);
       }
       for (const site of saved.sites) this.knownSites.set(site.id, site);
@@ -212,10 +213,22 @@ export class Coordinator {
           if (!local.peers.length) continue;
           let room = this.rooms.get(local.id);
           if (!room) {
-            room = { id: local.id, name: local.name, peers: [], emptySince: null };
+            room = {
+              id: local.id,
+              name: local.name,
+              peers: [],
+              emptySince: null,
+              voiceChatEnabled: local.voiceChatEnabled === true,
+            };
             this.rooms.set(room.id, room);
           }
-          room.peers.push(...local.peers.map((peer) => ({ ...peer, siteId })));
+          room.peers.push(
+            ...local.peers.map((peer) => ({
+              ...peer,
+              siteId,
+              shares: peer.shares.filter((share) => !share.appData.voiceChat || room.voiceChatEnabled),
+            })),
+          );
           changed.add(room);
         }
         entry.registered = true;
@@ -246,7 +259,13 @@ export class Coordinator {
           do {
             id = randomBytes(4).toString('hex').slice(0, 6).toUpperCase();
           } while (this.rooms.has(id));
-          room = { id, name: `${request.name.slice(0, 40)}の部屋`, peers: [], emptySince: null };
+          room = {
+            id,
+            name: `${request.name.slice(0, 40)}の部屋`,
+            peers: [],
+            emptySince: null,
+            voiceChatEnabled: false,
+          };
           this.rooms.set(id, room);
         }
         if (room.peers.some((peer) => peer.id === request.peerId)) throw new Error('Participant already joined');
@@ -263,9 +282,27 @@ export class Coordinator {
         this.save();
         return;
       }
+      case 'voice': {
+        const room = this.room(request.roomId);
+        this.peer(room, siteId, request.peerId);
+        if (typeof request.enabled !== 'boolean') throw new Error('Invalid VC setting');
+        room.voiceChatEnabled = request.enabled;
+        if (!request.enabled)
+          for (const peer of room.peers) peer.shares = peer.shares.filter((share) => !share.appData.voiceChat);
+        this.broadcast(room);
+        this.save();
+        return { voiceChatEnabled: room.voiceChatEnabled };
+      }
       case 'publish': {
         const room = this.room(request.roomId);
         const peer = this.peer(room, siteId, request.peerId);
+        if (request.share.appData.voiceChat) {
+          if (!room.voiceChatEnabled) throw new Error('ルームのVCは無効です');
+          if (request.share.kind !== 'audio' || request.share.appData.videoProducerId)
+            throw new Error('VC must be an independent audio stream');
+          if (peer.shares.some((share) => share.appData.voiceChat && share.id !== request.share.id))
+            throw new Error('VC stream already exists');
+        }
         if (request.share.appData.compatibilityFor) throw new Error('Compatibility streams are not room listings');
         peer.shares = [...peer.shares.filter((share) => share.id !== request.share.id), request.share];
         this.broadcast(room);

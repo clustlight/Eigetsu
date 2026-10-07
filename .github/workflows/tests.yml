@@ -53,7 +53,7 @@ jobs:
         run: npm run test:client-logic
 
   sfu-integration:
-    name: SFU and mediasoup tests
+    name: Typecheck and SFU tests
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -68,6 +68,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             sfu/package-lock.json
+            api/package-lock.json
 
       - name: Install client and test dependencies
         run: npm ci --no-audit --no-fund
@@ -78,3 +79,10 @@ jobs:
 
       - name: Run SFU integration tests
         run: npm run test:sfu-integration
+
+      - name: Install API dependencies for type checking
+        working-directory: api
+        run: npm ci --no-audit --no-fund
+
+      - name: Check all application and test TypeScript files
+        run: npm run typecheck

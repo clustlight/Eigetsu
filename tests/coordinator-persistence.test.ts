@@ -75,6 +75,7 @@ test('coordinator persists room metadata atomically and restores it after restar
   resources.firstSocket = site.socket;
   await site.request({ action: 'register', rooms: [] });
   const room = await site.request<RoomSnapshot>({ action: 'join', peerId: 'alice', name: 'Alice' });
+  await site.request({ action: 'voice', roomId: room.id, peerId: 'alice', enabled: true });
   await site.request({
     action: 'publish',
     roomId: room.id,
@@ -88,6 +89,7 @@ test('coordinator persists room metadata atomically and restores it after restar
     sites: Array<{ id: string; instanceId: string }>;
   };
   assert.equal(saved.version, 1);
+  assert.equal(saved.rooms[0].voiceChatEnabled, true);
   assert.equal(saved.rooms[0].peers[0].shares[0].id, 'screen-1');
   assert.equal(saved.sites[0].id, 'tokyo');
   assert.equal(
@@ -108,6 +110,7 @@ test('coordinator persists room metadata atomically and restores it after restar
   const restored = second.coordinator.rooms.get(room.id);
   assert.ok(restored, 'room should be restored from the state file');
   assert.equal(restored.name, room.name);
+  assert.equal(restored.voiceChatEnabled, true);
   assert.equal(restored.peers[0].id, 'alice');
   assert.equal(restored.peers[0].siteId, 'tokyo');
   assert.equal(restored.peers[0].shares[0].id, 'screen-1');

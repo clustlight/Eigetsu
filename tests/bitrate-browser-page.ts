@@ -1,36 +1,31 @@
 import { Device } from 'mediasoup-client';
 import { io } from 'socket.io-client';
+import { createRpc, check } from './browser-rpc.ts';
+import type { Transport, ShareAppData } from '../src/types.ts';
 import {
   screenShareEncodingOptions,
   preferScreenShareResolution,
   produceScreenShareVideo,
   selectScreenShareCodec,
-} from '/src/screen-share-quality.ts';
-import { defaultQualityPreset, qualityPresets } from '/src/quality-presets.ts';
-import { produceScreenShareAudio } from '/src/screen-share-audio.ts';
+} from '../src/screen-share-quality.ts';
+import { defaultQualityPreset, qualityPresets } from '../src/quality-presets.ts';
+import { produceScreenShareAudio } from '../src/screen-share-audio.ts';
 import './audio-browser-page.ts';
 import './compatibility-browser-page.ts';
 import './cluster-browser-page.ts';
-import { configureScreenShareReceiver, readScreenReceiveStats } from '/src/screen-share-receive.ts';
+import { configureScreenShareReceiver, readScreenReceiveStats } from '../src/screen-share-receive.ts';
 
-window.runBitrateCheck = async (
+export const runBitrateCheck = async (
   mode = 'fixed',
   presetId = defaultQualityPreset.id,
   inspectHardware = false,
-  profilePrefix,
+  profilePrefix?: string,
 ) => {
   const preset = qualityPresets.find((item) => item.id === presetId);
   if (!preset) throw new Error(`Unknown preset: ${presetId}`);
   const socket = io('http://127.0.0.1:13000', { transports: ['websocket'] });
-  const rpc = (event, payload = {}) =>
-    new Promise((resolve, reject) =>
-      socket
-        .timeout(10000)
-        .emit(event, payload, (err, result) =>
-          err ? reject(err) : result.ok ? resolve(result) : reject(new Error(result.error)),
-        ),
-    );
-  await new Promise((resolve, reject) => {
+  const rpc = createRpc(socket, 10000);
+  await new Promise<void>((resolve, reject) => {
     socket.once('connect', resolve);
     socket.once('connect_error', reject);
   });
@@ -40,21 +35,21 @@ window.runBitrateCheck = async (
   const sendRtpCapabilities = profilePrefix
     ? {
         ...device.sendRtpCapabilities,
-        codecs: device.sendRtpCapabilities.codecs.filter(
+        codecs: (device.sendRtpCapabilities.codecs || []).filter(
           (codec) =>
             codec.mimeType.toLowerCase() === 'video/h264' &&
-            codec.parameters?.['profile-level-id']?.startsWith(profilePrefix),
+            String(codec.parameters?.['profile-level-id'] || '').startsWith(profilePrefix),
         ),
       }
     : device.sendRtpCapabilities;
   const codec = selectScreenShareCodec(sendRtpCapabilities);
-  const createTransport = async (direction = 'send', producerId) => {
+  const createTransport = async (direction: 'send' | 'recv' = 'send', producerId?: string) => {
     const info = await rpc('transport:create', {
       direction,
       producerId,
       newShare: direction === 'send' && !producerId,
     });
-    const transport = device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
+    const transport = device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport']<ShareAppData>(info);
     transport.observer.once('close', () => socket.emit('transport:close', { transportId: transport.id }));
     transport.on('connect', ({ dtlsParameters }, ok, fail) =>
       rpc('transport:connect', { transportId: transport.id, dtlsParameters }).then(ok, fail),
@@ -68,6 +63,7 @@ window.runBitrateCheck = async (
   canvas.width = preset.width;
   canvas.height = preset.height;
   const context = canvas.getContext('2d');
+  check(context, 'Canvas 2D is unavailable');
   let frame = 0;
   const paint = () => {
     const t = frame++;
@@ -85,12 +81,22 @@ window.runBitrateCheck = async (
   let transport;
   let producer;
   if (mode.startsWith('fixed')) {
-    ({ transport, producer } = await produceScreenShareVideo(createTransport, track, preset, {}, sendRtpCapabilities));
+    ({ transport, producer } = await produceScreenShareVideo(
+      (producerId) => createTransport('send', producerId),
+      track,
+      preset,
+      {},
+      sendRtpCapabilities,
+    ));
   } else {
     transport = await createTransport();
     const options = screenShareEncodingOptions(preset);
-    options.codecOptions.videoGoogleMinBitrate = Math.round((preset.bitrate * 0.8) / 1000);
-    producer = await transport.produce({ track, codec, ...options });
+    producer = await transport.produce({
+      track,
+      codec,
+      ...options,
+      codecOptions: { ...options.codecOptions, videoGoogleMinBitrate: Math.round((preset.bitrate * 0.8) / 1000) },
+    });
     await preferScreenShareResolution(producer);
   }
   // Negotiate audio after video, using a separate transport for the fixed modes.
@@ -118,9 +124,9 @@ window.runBitrateCheck = async (
   const secondVideo =
     mode === 'fixed-multiple'
       ? await produceScreenShareVideo(
-          createTransport,
+          (producerId) => createTransport('send', producerId),
           track.clone(),
-          qualityPresets.find((item) => item.id === '720p30'),
+          qualityPresets.find((item) => item.id === '720p30')!,
           {},
           device.sendRtpCapabilities,
         )
@@ -181,16 +187,17 @@ window.runBitrateCheck = async (
         receivedHeight: measuredReceive?.height,
       });
     }
+    check(producer.rtpSender, 'Video sender is unavailable');
     const parameters = producer.rtpSender.getParameters();
     const receiverStats = consumer ? await consumer.getStats() : null;
     const inbound =
       receiverStats && [...receiverStats.values()].find((stat) => stat.type === 'inbound-rtp' && stat.kind === 'video');
     const receiver = inbound
       ? {
-          codec: receiverStats.get(inbound.codecId)?.mimeType,
+          codec: receiverStats?.get(inbound.codecId)?.mimeType,
           framesDecoded: inbound.framesDecoded,
-          renderedFrames: playback.getVideoPlaybackQuality().totalVideoFrames,
-          bufferTargetMs: consumer.rtpReceiver.jitterBufferTarget,
+          renderedFrames: playback!.getVideoPlaybackQuality().totalVideoFrames,
+          bufferTargetMs: consumer?.rtpReceiver?.jitterBufferTarget,
           stats: measuredReceive,
         }
       : null;
@@ -220,19 +227,25 @@ window.runBitrateCheck = async (
     transport.close();
     if (audioTransport !== transport) audioTransport.close();
     // Closing a client transport must also remove the owning socket's SFU transport.
-    for (const item of [transport, audioTransport, secondVideo?.transport, recvTransport].filter(Boolean)) {
+    for (const item of [transport, audioTransport, secondVideo?.transport, recvTransport].filter(
+      (item): item is Transport => Boolean(item),
+    )) {
       let closeError;
       try {
-        await rpc('transport:connect', { transportId: item.id, dtlsParameters: {} });
+        await rpc('transport:connect', { transportId: item.id, dtlsParameters: { fingerprints: [] } });
       } catch (error) {
         closeError = error;
       }
       // A cleanup failure makes the browser check invalid, so surface it even if the main run also failed.
-      // eslint-disable-next-line no-unsafe-finally
-      if (closeError?.message !== 'Transport not found') throw new Error('SFU did not release a closed send transport');
+      if (!(closeError instanceof Error) || closeError.message !== 'Transport not found') {
+        // eslint-disable-next-line no-unsafe-finally
+        throw new Error('SFU did not release a closed send transport');
+      }
     }
     socket.disconnect();
     if (audioShare) await audioShare.audioGain.context.close();
     await audio.close();
   }
 };
+
+window.runBitrateCheck = runBitrateCheck;

@@ -3,6 +3,7 @@ import type { Socket } from 'socket.io-client';
 import type { createCompatibleVideoSender } from './compatible-video.ts';
 
 export interface ShareAppData extends Record<string, unknown> {
+  voiceChat?: boolean;
   label?: string;
   profile?: string;
   clientId?: string;
@@ -65,6 +66,7 @@ export interface RemoteShare extends ShareBase {
 }
 export type Share = LocalShare | RemoteShare;
 export interface Room {
+  voiceChatEnabled: boolean;
   id: string;
   name: string;
   people: number;
@@ -98,6 +100,7 @@ export interface ProducerAnnouncement {
   appData: ShareAppData;
 }
 export interface Connection {
+  voiceChat?: import('./voice-chat.ts').VoiceChatSession;
   transports: Set<Transport>;
   socket: Socket;
   device: Device;
@@ -107,11 +110,18 @@ export interface Connection {
   compatibleSender?: ReturnType<typeof createCompatibleVideoSender>;
 }
 
-type RoomResponse = { roomId: string; roomName: string; rtpCapabilities: Media.RtpCapabilities; peers: Peer[] };
+type RoomResponse = {
+  roomId: string;
+  roomName: string;
+  voiceChatEnabled: boolean;
+  rtpCapabilities: Media.RtpCapabilities;
+  peers: Peer[];
+};
 export interface RpcResponses {
   'room:create': RoomResponse;
   'room:join': RoomResponse;
-  'room:sync': { peers: Peer[] };
+  'room:sync': { peers: Peer[]; voiceChatEnabled: boolean };
+  'room:voice': { voiceChatEnabled: boolean };
   'transport:create': Media.TransportOptions<ShareAppData>;
   'transport:connect': object;
   produce: { id: string };
@@ -121,6 +131,7 @@ export interface RpcResponses {
   'consumer:keyframe': object;
 }
 export interface RpcRequests {
+  'room:voice': { enabled: boolean };
   'room:create': { name: string };
   'room:join': { roomId: string; name: string };
   'room:sync': Record<string, never>;

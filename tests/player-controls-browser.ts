@@ -1,17 +1,42 @@
+import type { BrowserHarnessWithRoot } from './browser-harness.ts';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export async function runPlayerControlsCheck({ evaluate, command, root }) {
-  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const waitFor = async (expression, sessionId) => {
+interface Bounds {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+  width: number;
+  height: number;
+}
+interface PlayerSnapshot {
+  visible: boolean;
+  idle: boolean;
+  cursor: string;
+  opacities: number[];
+  top: Bounds;
+  bottom: Bounds;
+  video: Bounds;
+  media: Bounds;
+  source: { width: number; height: number };
+  fit: string;
+  width: number;
+  height: number;
+  fullscreen: boolean;
+  fullscreenIsPlayer: boolean;
+}
+export async function runPlayerControlsCheck({ evaluate, command, root }: BrowserHarnessWithRoot) {
+  const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const waitFor = async (expression: string, sessionId?: string) => {
     for (let attempt = 0; attempt < 100; attempt++) {
       if (await evaluate(expression, sessionId)) return;
       await delay(100);
     }
     throw new Error(`Player check timed out: ${expression}`);
   };
-  const pointer = async (type, pointerType = 'mouse', selector = '.video-wrap video', sessionId) => {
+  const pointer = async (type: string, pointerType = 'mouse', selector = '.video-wrap video', sessionId?: string) => {
     await evaluate(
       `(() => {
       const target = document.querySelector(${JSON.stringify(selector)});
@@ -21,8 +46,8 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
     );
     await delay(30);
   };
-  const snapshot = (sessionId) =>
-    evaluate(
+  const snapshot = (sessionId?: string) =>
+    evaluate<PlayerSnapshot>(
       `(() => {
     const player = document.querySelector('.share-grid.is-focused, .focus-window');
     const bars = [...player.querySelectorAll('[data-player-controls]')];
@@ -42,7 +67,7 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
   })()`,
       sessionId,
     );
-  const checkLayout = (state) => {
+  const checkLayout = (state: PlayerSnapshot) => {
     if (state.fullscreen) {
       assert.equal(state.fullscreenIsPlayer, true, 'Fullscreen must target the shared-screen player');
       assert.ok(
@@ -64,19 +89,19 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
     assert.ok(state.bottom.left >= 0 && state.bottom.right <= state.width + 1, 'Controls overflow the viewport');
     assert.ok(state.video.width > 0 && state.video.height > 0, 'Video area collapsed');
     assert.equal(state.fit, 'contain', 'Video must preserve its source aspect ratio');
-    for (const edge of ['top', 'bottom', 'left', 'right']) {
+    for (const edge of ['top', 'bottom', 'left', 'right'] as const) {
       assert.ok(Math.abs(state.media[edge] - state.video[edge]) <= 1, `Video escaped its available ${edge} boundary`);
     }
     assert.ok(state.source.width > 0 && state.source.height > 0, 'Source video dimensions missing');
   };
-  const checkDiagnostics = async (sessionId) => {
+  const checkDiagnostics = async (sessionId?: string) => {
     const before = await snapshot(sessionId);
     assert.equal(await evaluate("Boolean(document.querySelector('.player-diagnostics'))", sessionId), false);
     await evaluate("document.querySelector('.diagnostics-toggle').click()", sessionId);
     await waitFor("Boolean(document.querySelector('.player-diagnostics.is-right .stream-diagnostics'))", sessionId);
     assert.deepEqual((await snapshot(sessionId)).video, before.video, 'Opening diagnostics shrank the video');
     const getPanel = () =>
-      evaluate(
+      evaluate<Pick<Bounds, 'left' | 'right' | 'top' | 'bottom'>>(
         "(() => {const r=document.querySelector('.player-diagnostics').getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};})()",
         sessionId,
       );
@@ -102,8 +127,8 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
       'false',
     );
   };
-  const tap = async (sessionId) => {
-    const point = await evaluate(
+  const tap = async (sessionId?: string) => {
+    const point = await evaluate<{ x: number; y: number }>(
       "(() => { const rect = document.querySelector('.video-wrap').getBoundingClientRect(); return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }; })()",
       sessionId,
     );
@@ -111,7 +136,7 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
     await command('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] }, sessionId);
     await delay(50);
   };
-  const capture = async (name, sessionId) => {
+  const capture = async (name: string, sessionId?: string) => {
     // Let control opacity transitions and browser painting settle first.
     await delay(180);
     const directory = path.join(root, 'tmp', 'player-controls');
@@ -161,7 +186,7 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
   await evaluate("document.querySelector('.share-screen-btn').click()");
   await waitFor("Boolean(document.querySelector('.stream-card .mute-toggle'))");
   await waitFor("document.querySelector('.stream-diagnostics')?.textContent.includes('送信:')");
-  assert.ok((await evaluate("document.querySelector('.stream-quality').textContent")).includes('FPS'));
+  assert.ok((await evaluate<string>("document.querySelector('.stream-quality').textContent")).includes('FPS'));
   assert.equal(await evaluate("document.querySelector('.stream-quality').hasAttribute('title')"), false);
   assert.equal(
     await evaluate(
@@ -291,7 +316,7 @@ export async function runPlayerControlsCheck({ evaluate, command, root }) {
     "document.querySelector('.focus-window .stream-diagnostics')?.textContent.includes('再生:')",
     sessionId,
   );
-  const receivedDiagnostics = await evaluate(
+  const receivedDiagnostics = await evaluate<string>(
     "document.querySelector('.focus-window .stream-diagnostics').textContent",
     sessionId,
   );

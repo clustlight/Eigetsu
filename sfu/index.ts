@@ -27,12 +27,13 @@ const pendingRooms = new Map<string, Promise<Room>>();
 const roomSnapshots = new Map<string, RoomSnapshot>();
 const ROOM_RETENTION_MS = 5 * 60 * 1000;
 if (config.role !== 'sfu') new Coordinator(io, config.secret, config.stateFile, config.siteGraceMs);
-const cluster = new ClusterClient(config.masterUrl, config.secret, config.site, () =>
+const cluster: ClusterClient = new ClusterClient(config.masterUrl, config.secret, config.site, () =>
   [...rooms.values()]
     .filter((room) => room.peers.size)
     .map((room) => ({
       id: room.id,
       name: room.name,
+      voiceChatEnabled: cluster.rooms.get(room.id)?.voiceChatEnabled === true,
       peers: [...room.peers.values()].map(peerInfo),
     })),
 );
@@ -47,6 +48,12 @@ cluster.onRoom = (snapshot) => {
   roomSnapshots.set(snapshot.id, snapshot);
   const local = rooms.get(snapshot.id);
   if (local) local.name = snapshot.name;
+  const voiceChatEnabled = snapshot.voiceChatEnabled === true;
+  if (!voiceChatEnabled && local)
+    for (const peer of local.peers.values())
+      for (const producer of peer.producers.values()) if (producer.appData.voiceChat) producer.close();
+  if (previous?.voiceChatEnabled !== snapshot.voiceChatEnabled)
+    io.to(snapshot.id).emit('room:voice', { voiceChatEnabled });
   for (const peer of previous?.peers || []) {
     const next = snapshot.peers.find((item) => item.id === peer.id);
     if (!next) io.to(snapshot.id).except(peer.id).emit('peer:left', { peerId: peer.id });
@@ -285,6 +292,7 @@ io.on('connection', (socket) => {
         ok: true,
         roomId: joinedRoom.id,
         roomName: joinedRoom.name,
+        voiceChatEnabled: cluster.rooms.get(joinedRoom.id)?.voiceChatEnabled === true,
         rtpCapabilities: joinedRoom.router.rtpCapabilities,
         peers: [],
       });
@@ -304,6 +312,7 @@ io.on('connection', (socket) => {
         ok: true,
         roomId: id,
         roomName: joinedRoom.name,
+        voiceChatEnabled: cluster.rooms.get(joinedRoom.id)?.voiceChatEnabled === true,
         rtpCapabilities: joinedRoom.router.rtpCapabilities,
         peers: (cluster.rooms.get(id)?.peers || []).filter((p) => p.id !== socket.id),
       });
@@ -316,8 +325,24 @@ io.on('connection', (socket) => {
     if (!room || !peer) return reply(callback, { ok: false, error: 'Not joined to a room' });
     reply(callback, {
       ok: true,
+      voiceChatEnabled: cluster.rooms.get(room.id)?.voiceChatEnabled === true,
       peers: (cluster.rooms.get(room.id)?.peers || []).filter((item) => item.id !== socket.id),
     });
+  });
+
+  socket.on('room:voice', async ({ enabled }, callback) => {
+    try {
+      if (!room || !peer) throw new Error('先にルームに参加してください');
+      const result = await cluster.request<{ voiceChatEnabled: boolean }>({
+        action: 'voice',
+        roomId: room.id,
+        peerId: socket.id,
+        enabled,
+      });
+      reply(callback, { ok: true, ...result });
+    } catch (error) {
+      reply(callback, { ok: false, error: error instanceof Error ? error.message : String(error) });
+    }
   });
 
   async function joinRoom(id: string | undefined, name: string) {
@@ -424,6 +449,13 @@ io.on('connection', (socket) => {
       if (!room || !peer) throw new Error('先にルームに参加してください');
       if (transport.appData.direction !== 'send') throw new Error('Invalid transport direction');
       const producerRoom = room;
+      if (appData?.voiceChat) {
+        if (!cluster.rooms.get(room.id)?.voiceChatEnabled) throw new Error('ルームのVCは無効です');
+        if (kind !== 'audio' || appData.videoProducerId || appData.compatibilityFor)
+          throw new Error('VC must be an independent audio stream');
+        if ([...producers.values()].some((producer) => producer.appData.voiceChat))
+          throw new Error('VC stream already exists');
+      }
       const parent = appData?.compatibilityFor ? producers.get(appData.compatibilityFor) : undefined;
       if (
         appData?.compatibilityFor &&

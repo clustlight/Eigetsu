@@ -67,6 +67,52 @@ test('master authenticates SFUs, prevents duplicate sites and enforces peer owne
   assert.ok(alice);
   assert.deepEqual(alice.shares, [share]);
   assert.equal(alice.siteId, 'a');
+  assert.equal(snapshot.voiceChatEnabled, false);
+  const voice = { id: 'voice-1', kind: 'audio' as const, label: 'VC', appData: { voiceChat: true } };
+  await assert.rejects(a.request({ action: 'publish', roomId: room.id, peerId: 'alice', share: voice }), /VC/);
+  await assert.rejects(
+    b.request({ action: 'voice', roomId: room.id, peerId: 'alice', enabled: true }),
+    /Participant not found/,
+  );
+  const updated = new Promise<RoomSnapshot>((resolve) => b.socket.once('room:update', resolve));
+  await a.request({ action: 'voice', roomId: room.id, peerId: 'alice', enabled: true });
+  assert.equal((await updated).voiceChatEnabled, true);
+  await a.request({ action: 'publish', roomId: room.id, peerId: 'alice', share: voice });
+  await assert.rejects(
+    a.request({ action: 'publish', roomId: room.id, peerId: 'alice', share: { ...voice, id: 'duplicate' } }),
+    /already exists/,
+  );
+  await assert.rejects(
+    b.request({ action: 'publish', roomId: room.id, peerId: 'bob', share: { ...voice, kind: 'video' } }),
+    /independent audio/,
+  );
+  await b.request({ action: 'publish', roomId: room.id, peerId: 'bob', share: { ...voice, id: 'voice-2' } });
+  const activeVoice = await a.request<RoomSnapshot>({ action: 'sync', roomId: room.id });
+  assert.equal(activeVoice.peers.flatMap((peer) => peer.shares).filter((share) => share.appData.voiceChat).length, 2);
+  await b.request({ action: 'voice', roomId: room.id, peerId: 'bob', enabled: false });
+  const disabledVoice = await a.request<RoomSnapshot>({ action: 'sync', roomId: room.id });
+  assert.equal(disabledVoice.voiceChatEnabled, false);
+  assert.deepEqual(
+    disabledVoice.peers.flatMap((peer) => peer.shares),
+    [share],
+  );
+  await a.request({
+    action: 'register',
+    rooms: [
+      {
+        id: room.id,
+        name: snapshot.name,
+        voiceChatEnabled: true,
+        peers: [{ id: 'alice', name: 'Alice', shares: [share, voice] }],
+      },
+    ],
+  });
+  const recovered = await b.request<RoomSnapshot>({ action: 'sync', roomId: room.id });
+  assert.equal(recovered.voiceChatEnabled, false, 'A stale edge cannot enable VC during re-registration');
+  assert.deepEqual(
+    recovered.peers.flatMap((peer) => peer.shares),
+    [share],
+  );
   await a.request({ action: 'leave', roomId: room.id, peerId: 'alice' });
   await b.request({ action: 'leave', roomId: room.id, peerId: 'bob' });
   const listing = await b.request<Array<{ peopleCount: number; remainingMs: number | null }>>({ action: 'rooms' });
