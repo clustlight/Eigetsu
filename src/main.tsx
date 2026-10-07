@@ -48,6 +48,7 @@ import './style.css';
 const params = new URLSearchParams(location.search);
 const inviteRoom = params.get('room');
 const focusProducer = params.get('focus');
+const displayNameStorageKey = 'eigetsu-display-name';
 const clientId =
   localStorage.getItem('eigetsu-client-id') ||
   (() => {
@@ -307,7 +308,13 @@ function App() {
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(Boolean(inviteRoom || focusProducer));
   const [connectionError, setConnectionError] = useState('');
-  const [displayName, setDisplayName] = useState('ゲスト');
+  const [displayName, setDisplayNameState] = useState(
+    () => localStorage.getItem(displayNameStorageKey)?.trim() || 'ゲスト',
+  );
+  const setDisplayName = useCallback((value: string) => {
+    setDisplayNameState(value);
+    localStorage.setItem(displayNameStorageKey, value);
+  }, []);
   const [presetId, setPresetId] = useState(() => {
     const storageKey = 'eigetsu-quality-preset';
     const saved = localStorage.getItem(storageKey);
@@ -775,9 +782,9 @@ function App() {
   );
 
   useEffect(() => {
-    if (inviteRoom) connectRoom(inviteRoom, 'ゲスト');
+    if (inviteRoom) connectRoom(inviteRoom, displayName);
     else if (focusProducer) showNotice('部屋情報がありません', true);
-  }, [connectRoom, showNotice]);
+  }, [connectRoom, displayName, showNotice]);
 
   useEffect(() => {
     if (room || inviteRoom) return undefined;
@@ -1056,7 +1063,7 @@ function App() {
     return (
       <div className="boot-screen">
         <div>{connectionError || notice || '画面ルームに接続できません'}</div>
-        <button onClick={() => connectRoom(inviteRoom, 'ゲスト')}>再接続</button>
+        <button onClick={() => connectRoom(inviteRoom, displayName)}>再接続</button>
       </div>
     );
   if (!room)
