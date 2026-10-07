@@ -1,4 +1,5 @@
 import type { types as Media } from 'mediasoup';
+import type { ShareRouting } from './share-routing.ts';
 
 export interface ShareAppData extends Record<string, unknown> {
   ownerId?: string;
@@ -26,6 +27,7 @@ export interface Room {
   id: string;
   name: string;
   router: Media.Router;
+  routing: ShareRouting;
   peers: Map<string, Peer>;
   compatibilityRequests: Map<string, Promise<Producer>>;
   compatibilityStreams: Map<string, CompatibilityStream>;
@@ -38,7 +40,10 @@ export interface ClientEvents {
   'room:create': (data: { name: string }, reply: Ack) => void;
   'room:join': (data: { roomId: string; name: string }, reply: Ack) => void;
   'room:sync': (reply: Ack) => void;
-  'transport:create': (data: { direction: 'send' | 'recv' }, reply: Ack) => void;
+  'transport:create': (
+    data: { direction: 'send' | 'recv'; producerId?: string; newShare?: boolean },
+    reply: Ack,
+  ) => void;
   'transport:connect': (data: { transportId: string; dtlsParameters: Media.DtlsParameters }, reply: Ack) => void;
   'transport:close': (data: { transportId: string }) => void;
   produce: (

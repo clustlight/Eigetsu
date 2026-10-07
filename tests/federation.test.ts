@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createRequire } from 'node:module';
 import type { types as Media } from '../sfu/node_modules/mediasoup/node/lib/index.d.ts';
 import { Federation } from '../sfu/federation.ts';
+import { ShareRouting, ShareWorkerPool } from '../sfu/share-routing.ts';
 import type { ClusterClient } from '../sfu/cluster-client.ts';
 import type { PipeCommand, RoomSnapshot, Site } from '../sfu/cluster-types.ts';
 import type { Producer, Room } from '../sfu/types.ts';
@@ -35,14 +36,20 @@ test(
       id: 'ROOM01',
       name: 'Pipe recovery',
       router,
+      routing: new ShareRouting(new ShareWorkerPool(workers, codecs)),
       peers: new Map([[id, { id, name: id, producers }]]),
       compatibilityStreams: new Map(),
       compatibilityRequests: new Map(),
       cleanupTimer: null,
       emptySince: null,
     });
-    const originRoom = localRoom(originRouter, 'sender', new Map([[source.id, source]]));
-    const targetRoom = localRoom(targetRouter, 'viewer', new Map());
+    const originRoom = localRoom(
+      await workers[0].createRouter({ mediaCodecs: codecs }),
+      'sender',
+      new Map([[source.id, source]]),
+    );
+    const targetRoom = localRoom(await workers[1].createRouter({ mediaCodecs: codecs }), 'viewer', new Map());
+    originRoom.routing.registerProducer(source, originRouter);
     const snapshot: RoomSnapshot = {
       id: 'ROOM01',
       name: 'Pipe recovery',
@@ -97,7 +104,7 @@ test(
     });
     const receiver = await targetRouter.createWebRtcTransport({ listenInfos: [{ protocol: 'udp', ip: '127.0.0.1' }] });
     const subscribe = async () => {
-      const lease = await destination.acquire(targetRoom, source.id, targetRouter.rtpCapabilities);
+      const lease = await destination.acquire(targetRoom, source.id, targetRouter.rtpCapabilities, targetRouter);
       const consumer = await receiver.consume({
         producerId: lease.producer.id,
         rtpCapabilities: targetRouter.rtpCapabilities,

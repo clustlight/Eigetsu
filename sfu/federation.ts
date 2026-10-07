@@ -69,15 +69,20 @@ export class Federation {
     timer.unref();
   }
 
-  private async transport(room: Room) {
-    return room.router.createPipeTransport({
+  private async transport(router: Media.Router) {
+    return router.createPipeTransport({
       listenInfo: { protocol: 'udp', ip: this.listenIp, announcedAddress: this.cluster.site.pipeAddress },
       enableRtx: true,
       enableSrtp: true,
     });
   }
 
-  async acquire(room: Room, originalId: string, capabilities: Media.RtpCapabilities): Promise<ProducerLease> {
+  async acquire(
+    room: Room,
+    originalId: string,
+    capabilities: Media.RtpCapabilities,
+    router = room.router,
+  ): Promise<ProducerLease> {
     const owner = this.cluster.rooms
       .get(room.id)
       ?.peers.find((peer) => peer.shares.some((share) => share.id === originalId));
@@ -88,19 +93,19 @@ export class Federation {
       producerId: originalId,
       rtpCapabilities: capabilities,
     });
-    const key = `${room.id}/${resolved.producerId}`;
+    const key = `${room.id}/${router.id}/${resolved.producerId}`;
     let entry = this.incoming.get(key);
     if (!entry || entry.closed) {
       let pending = this.pending.get(key);
       if (!pending) {
-        pending = this.openIncoming(room, owner.siteId, originalId, resolved.producerId, key).finally(() =>
+        pending = this.openIncoming(room, router, owner.siteId, originalId, resolved.producerId, key).finally(() =>
           this.pending.delete(key),
         );
         this.pending.set(key, pending);
       }
       entry = await pending;
     }
-    if (entry.closed || room.router.closed) throw new Error('共有が終了しています');
+    if (entry.closed || router.closed) throw new Error('共有が終了しています');
     this.retries.delete(`${room.id}/${originalId}`);
     entry.reservations++;
     const selected = entry;
@@ -135,13 +140,14 @@ export class Federation {
 
   private async openIncoming(
     room: Room,
+    router: Media.Router,
     siteId: string,
     originalId: string,
     producerId: string,
     key: string,
   ): Promise<Incoming> {
     const linkId = randomUUID();
-    const transport = await this.transport(room);
+    const transport = await this.transport(router);
     try {
       const description = await this.cluster.relay<PipeDescription & { address: string }>(siteId, {
         action: 'open',
@@ -150,7 +156,7 @@ export class Federation {
         linkId,
         endpoint: { port: transport.tuple.localPort, srtpParameters: transport.srtpParameters! },
       });
-      if (transport.closed || room.router.closed) throw new Error('Room closed while connecting sites');
+      if (transport.closed || router.closed) throw new Error('Room closed while connecting sites');
       await transport.connect({
         ip: description.address,
         port: description.port,
@@ -295,7 +301,7 @@ export class Federation {
       .find((producer) => producer && !producer.closed);
     if (!source) throw new Error('共有が終了しています');
     if (this.outgoing.has(command.linkId)) throw new Error('Duplicate pipe identifier');
-    const transport = await this.transport(room);
+    const transport = await this.transport(room.routing.producerRouter(source.id) || room.router);
     try {
       // Use the address registered by the authenticated destination SFU, never a browser supplied address.
       await transport.connect({

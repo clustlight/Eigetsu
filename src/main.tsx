@@ -281,7 +281,7 @@ function StreamQuality({ share }: { share: Share }) {
 
 function disposeMedia(current: Connection, shares: Map<string, Share>) {
   current.compatibleSender?.close();
-  current.recvTransport.close();
+  for (const transport of current.transports) transport.close();
   for (const share of shares.values()) {
     share.producer?.close();
     share.audioProducer?.close();
@@ -425,12 +425,21 @@ function App() {
         const device = new Device();
         await device.load({ routerRtpCapabilities: response.rtpCapabilities });
         const transports = new Set<Transport>();
-        const createTransport = async (direction: 'send' | 'recv'): Promise<Transport> => {
-          const info = await rpc(socket, 'transport:create', { direction });
+        const createTransport = async (direction: 'send' | 'recv', producerId?: string): Promise<Transport> => {
+          const info = await rpc(socket, 'transport:create', {
+            direction,
+            producerId,
+            newShare: direction === 'send' && !producerId,
+          });
+          if (epoch !== connectionEpoch.current || !socket.connected) {
+            socket.emit('transport:close', { transportId: info.id });
+            throw new Error('接続が中断されました');
+          }
           const transport =
             device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport']<ShareAppData>(info);
           transports.add(transport);
           transport.observer.once('close', () => transports.delete(transport));
+          transport.observer.once('close', () => socket.emit('transport:close', { transportId: transport.id }));
           transport.on('connect', ({ dtlsParameters }, callback, errback) => {
             rpc(socket, 'transport:connect', { transportId: transport.id, dtlsParameters })
               .then(() => callback())
@@ -443,7 +452,6 @@ function App() {
             }
           });
           if (direction === 'send') {
-            transport.observer.once('close', () => socket.emit('transport:close', { transportId: transport.id }));
             transport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
               rpc(socket, 'produce', { transportId: transport.id, kind, rtpParameters, appData })
                 .then((result) => callback({ id: result.id }))
@@ -452,23 +460,20 @@ function App() {
           }
           return transport;
         };
-        const recvTransport = await createTransport('recv');
         if (epoch !== connectionEpoch.current || !socket.connected) {
-          recvTransport.close();
           throw new Error('接続が中断されました');
         }
         connection.current = {
           transports,
           socket,
           device,
-          createSendTransport: () => createTransport('send'),
-          recvTransport,
+          createSendTransport: (producerId) => createTransport('send', producerId),
           displayName: displayName.trim() || 'ゲスト',
           peerIds: new Set([socket.id!]),
         };
         const compatibleSender = createCompatibleVideoSender({
           getProducer: (id) => shareMap.current.get(id)?.producer,
-          createTransport: () => createTransport('send'),
+          createTransport: (producerId) => createTransport('send', producerId),
           capabilities: device.sendRtpCapabilities,
           onStatus: (id, active) => {
             const share = shareMap.current.get(id);
@@ -508,13 +513,21 @@ function App() {
             return;
           subscribing.add(producerId);
           let consumer: Consumer | undefined;
+          let receiving: Transport | undefined;
           try {
+            const recvTransport = await createTransport('recv', producerId);
+            receiving = recvTransport;
             const info = await rpc(socket, 'consume', {
               transportId: recvTransport.id,
               producerId,
               rtpCapabilities: device.recvRtpCapabilities,
             });
             consumer = await recvTransport.consume<ShareAppData>(info);
+            const consumerId = consumer.id;
+            consumer.observer.once('close', () => {
+              socket.emit('consumer:close', { consumerId });
+              recvTransport.close();
+            });
             if (connection.current?.socket !== socket || !socket.connected) throw new Error('接続が中断されました');
             if (closedProducers.has(producerId)) throw new Error('共有が終了しています');
             configureScreenShareReceiver(consumer);
@@ -646,6 +659,7 @@ function App() {
           } catch (error) {
             if (consumer) socket.emit('consumer:close', { consumerId: consumer.id });
             consumer?.close();
+            receiving?.close();
             if (connection.current?.socket !== socket || closedProducers.has(producerId)) return;
             console.warn('Unable to consume producer', error);
             if (producerId === focusProducer) setConnectionError(`配信を受信できません: ${errorMessage(error)}`);

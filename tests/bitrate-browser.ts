@@ -45,7 +45,7 @@ const masterEnv = {
   RTC_MAX_PORT: '41100',
   MEDIASOUP_ANNOUNCED_IP: '127.0.0.1',
   MEDIASOUP_LISTEN_IP: '127.0.0.1',
-  MEDIASOUP_WORKERS: '1',
+  MEDIASOUP_WORKERS: '2',
   PIPE_LISTEN_IP: '127.0.0.1',
   PIPE_ANNOUNCED_IP: '127.0.0.1',
   SFU_PUBLIC_URL: '',
@@ -108,7 +108,7 @@ try {
         RTC_MAX_PORT: String(minPort + 100),
         MEDIASOUP_ANNOUNCED_IP: '127.0.0.1',
         MEDIASOUP_LISTEN_IP: '127.0.0.1',
-        MEDIASOUP_WORKERS: '1',
+        MEDIASOUP_WORKERS: '2',
         PIPE_LISTEN_IP: '127.0.0.1',
       };
       edgeEnvs.push(env);
@@ -353,7 +353,9 @@ try {
         // while preserving actual ICE negotiation and connectivity at each SFU.
         const realStats = RTCPeerConnection.prototype.getStats;
         RTCPeerConnection.prototype.getStats = async function(...args) {
-          const report = await realStats.apply(this, args);
+          // RTCStatsReport may return fresh objects for get()/values(). Keep the
+          // injected RTTs in a stable map so the application's get(id) sees them.
+          const report = new Map((await realStats.apply(this, args)).entries());
           for (const stat of report.values()) {
             if (stat.type !== 'candidate-pair' || stat.currentRoundTripTime == null) continue;
             const port = report.get(stat.remoteCandidateId)?.port;
@@ -400,7 +402,7 @@ try {
       await writeFile(path.join(root, 'tmp/sfu-connection.png'), Buffer.from(roomScreenshot.data, 'base64'));
       const statistics = await (await fetch('http://127.0.0.1:13010/sfu/statistics')).json();
       assert.equal(statistics.sites.length, 3);
-      assert.ok(statistics.sites.every((site) => site.status === 'online' && site.metrics.workers.length === 1));
+      assert.ok(statistics.sites.every((site) => site.status === 'online' && site.metrics.workers.length === 2));
       assert.ok(statistics.sites.find((site) => site.id === 'b').metrics.clients.bytesSent > 0);
       assert.ok(statistics.sites.find((site) => site.id === 'c').metrics.pipes.bytesSent > 0);
       const dashboard = await command('Target.createTarget', { url: 'http://127.0.0.1:15173/cluster' });

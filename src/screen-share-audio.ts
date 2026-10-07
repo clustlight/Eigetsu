@@ -77,7 +77,7 @@ export async function produceScreenShareAudio(
     outputTrack = destination.stream.getAudioTracks()[0];
     // Web Audio creates a new track, so the capture track's hint is not inherited.
     outputTrack.contentHint = 'music';
-    transport = await createSendTransport();
+    transport = await createSendTransport(appData.videoProducerId);
     const producer = await transport.produce({
       track: outputTrack,
       appData,

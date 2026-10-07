@@ -15,7 +15,7 @@ export interface ShareAppData extends Record<string, unknown> {
 export type Producer = Media.Producer<ShareAppData>;
 export type Consumer = Media.Consumer<ShareAppData>;
 export type Transport = Media.Transport<ShareAppData>;
-export type CreateSendTransport = () => Promise<Transport>;
+export type CreateSendTransport = (producerId?: string) => Promise<Transport>;
 export interface AudioGain {
   gain: { setTargetAtTime(value: number, startTime: number, timeConstant: number): unknown };
   context: AudioContext;
@@ -102,7 +102,6 @@ export interface Connection {
   socket: Socket;
   device: Device;
   createSendTransport: CreateSendTransport;
-  recvTransport: Transport;
   displayName: string;
   peerIds: Set<string>;
   compatibleSender?: ReturnType<typeof createCompatibleVideoSender>;
@@ -125,7 +124,7 @@ export interface RpcRequests {
   'room:create': { name: string };
   'room:join': { roomId: string; name: string };
   'room:sync': Record<string, never>;
-  'transport:create': { direction: 'send' | 'recv' };
+  'transport:create': { direction: 'send' | 'recv'; producerId?: string; newShare?: boolean };
   'transport:connect': { transportId: string; dtlsParameters: Media.DtlsParameters };
   produce: { transportId: string; kind: Media.MediaKind; rtpParameters: Media.RtpParameters; appData: ShareAppData };
   consume: { transportId: string; producerId: string; rtpCapabilities: Media.RtpCapabilities };

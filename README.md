@@ -108,6 +108,10 @@ Run `npm run test:cluster` for the multi-site integration check and `npm run tes
 
 Screen sharing negotiates a compatible H.264 profile and adapts video quality to the selected preset and available connection. Each share has independent transport and quality settings. The UI reports measured capture, encoding, playback, and connection information where the browser provides it. Actual image quality and performance vary with the source and connection.
 
+Within each SFU, each screen has its own mediasoup router. Its audio and compatibility video use the same router and worker, including local viewers. New screens go to the worker with the fewest assigned screen groups across all rooms; simultaneous allocations are counted before router creation completes. Receiving sites also group a remote screen and its audio on one worker, sharing the inter-site stream among viewers. Idle screen routers are released after their transports close. The room router is retained for capability negotiation and legacy clients.
+
+Set `MEDIASOUP_WORKERS=2` (or another count up to the available CPU cores) to enable distribution. The default remains `1`. This balances screen counts, not measured CPU or bitrate, and does not migrate active screens or split one screen's viewers across workers. Browser receive transports are now separate per track, so connections and ports grow with viewed tracks. Deploy the frontend and SFU together and reload existing browser sessions to use screen routing.
+
 Shared audio uses a separate stereo audio track. The sender can adjust or mute the audio for everyone; each viewer controls their own playback volume and mute state.
 
 Run `npm run test:bitrate` to check video sending and playback, `npm run test:audio` for audio, and `npm run test:controls` for room and player controls.

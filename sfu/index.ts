@@ -12,6 +12,7 @@ import type { RoomSnapshot } from './cluster-types.js';
 import { createStatisticsCollector } from './statistics.ts';
 import { createWebRtcTransport } from './webrtc-transport.ts';
 import { installSfuProbe } from './probe.ts';
+import { ShareRouting, ShareWorkerPool } from './share-routing.ts';
 
 const config = readClusterConfig();
 
@@ -136,6 +137,7 @@ const mediaCodecs: mediasoup.types.RouterRtpCodecCapability[] = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 },
   { kind: 'video', mimeType: 'video/VP9', clockRate: 90000, parameters: { 'profile-id': 2 } },
 ];
+const shareWorkers = new ShareWorkerPool(workers, mediaCodecs);
 
 async function createWorker() {
   const worker = await mediasoup.createWorker({
@@ -171,6 +173,7 @@ async function getRoom(roomId: string, roomName?: string) {
       id: roomId,
       name: roomName || '配信ルーム',
       router,
+      routing: new ShareRouting(shareWorkers),
       peers: new Map(),
       compatibilityRequests: new Map(),
       compatibilityStreams: new Map(),
@@ -192,6 +195,7 @@ function retainEmptyRoom(room: Room) {
   room.cleanupTimer = setTimeout(() => {
     if (room.peers.size || rooms.get(room.id) !== room) return;
     room.router.close();
+    room.routing.close();
     rooms.delete(room.id);
     roomSnapshots.delete(room.id);
   }, ROOM_RETENTION_MS);
@@ -218,7 +222,8 @@ async function consumableProducer(room: Room, producerId: string, rtpCapabilitie
   const owner = [...room.peers.values()].find((peer) => peer.producers.has(producerId));
   const original = owner?.producers.get(producerId);
   if (!owner || !original || original.appData.compatibilityFor) throw new Error('共有が終了しています');
-  if (room.router.canConsume({ producerId, rtpCapabilities })) return original;
+  const router = room.routing.producerRouter(producerId) || room.router;
+  if (router.canConsume({ producerId, rtpCapabilities })) return original;
   const supportsBaseline = rtpCapabilities.codecs?.some(
     (codec) =>
       codec.mimeType.toLowerCase() === 'video/h264' &&
@@ -247,7 +252,7 @@ async function consumableProducer(room: Room, producerId: string, rtpCapabilitie
     }
     compatible = await pending;
   }
-  if (!room.router.canConsume({ producerId: compatible.id, rtpCapabilities }))
+  if (!router.canConsume({ producerId: compatible.id, rtpCapabilities }))
     throw new Error('この端末は互換配信に対応していません');
   return compatible;
 }
@@ -345,11 +350,27 @@ io.on('connection', (socket) => {
     }
   }
 
-  socket.on('transport:create', async ({ direction }, callback) => {
+  socket.on('transport:create', async ({ direction, producerId, newShare }, callback) => {
     try {
       if (!room) throw new Error('先にルームに参加してください');
-      const transport = await createWebRtcTransport(room.router);
+      if (direction !== 'send' && direction !== 'recv') throw new Error('Invalid transport direction');
+      let target: mediasoup.types.Router | string | undefined = room.router;
+      if (producerId) {
+        const local = [...room.peers.values()].find((item) => item.producers.has(producerId));
+        if (direction === 'send' && local?.id !== socket.id) throw new Error('Invalid share owner');
+        if (local) target = room.routing.producerRouter(producerId) || room.router;
+        else {
+          const remote = cluster.rooms
+            .get(room.id)
+            ?.peers.flatMap((item) => item.shares)
+            .find((item) => item.id === producerId);
+          if (!remote) throw new Error('共有が終了しています');
+          target = `remote:${remote.appData.videoProducerId || producerId}`;
+        }
+      } else if (direction === 'send' && newShare) target = undefined;
+      const transport = await room.routing.createTransport(target, createWebRtcTransport);
       transport.appData.direction = direction;
+      transport.appData.producerId = producerId;
       if (!socket.connected) {
         transport.close();
         throw new Error('Participant disconnected');
@@ -401,6 +422,7 @@ io.on('connection', (socket) => {
       const transport = transports.get(transportId);
       if (!transport) throw new Error('Transport not found');
       if (!room || !peer) throw new Error('先にルームに参加してください');
+      if (transport.appData.direction !== 'send') throw new Error('Invalid transport direction');
       const producerRoom = room;
       const parent = appData?.compatibilityFor ? producers.get(appData.compatibilityFor) : undefined;
       if (
@@ -409,16 +431,33 @@ io.on('connection', (socket) => {
       )
         throw new Error('Invalid compatibility source');
       if (parent && room.compatibilityStreams.has(parent.id)) throw new Error('Compatibility stream already exists');
+      const router = room.routing.transportRouter(transportId)!;
+      const relatedId = appData?.compatibilityFor || appData?.videoProducerId;
+      const related = relatedId ? producers.get(relatedId) : undefined;
+      if (
+        relatedId &&
+        (!related ||
+          related.closed ||
+          related.kind !== 'video' ||
+          (room.routing.producerRouter(relatedId) || room.router) !== router)
+      )
+        throw new Error('Related media must use the screen router');
       const producer = await transport.produce<ShareAppData>({
         kind,
         rtpParameters,
         appData: { ...appData, ownerId: socket.id },
       });
-      if (parent?.closed || !socket.connected || transport.closed) {
+      if (related?.closed || !socket.connected || transport.closed) {
         producer.close();
         throw new Error('共有が終了しています');
       }
       producers.set(producer.id, producer);
+      room.routing.registerProducer(producer, router);
+      if (related) {
+        const closeRelated = () => producer.close();
+        related.observer.once('close', closeRelated);
+        producer.observer.once('close', () => related.observer.removeListener('close', closeRelated));
+      }
       if (parent) {
         const state: CompatibilityStream = {
           producer,
@@ -486,9 +525,15 @@ io.on('connection', (socket) => {
     try {
       const transport = transports.get(transportId);
       if (!transport || !room) throw new Error('Transport not found');
+      if (transport.appData.direction !== 'recv') throw new Error('Invalid transport direction');
+      const router = room.routing.transportRouter(transportId)!;
       const local = [...room.peers.values()].some((peer) => peer.producers.has(producerId));
-      if (!local) lease = await federation.acquire(room, producerId, rtpCapabilities);
+      if (transport.appData.producerId && transport.appData.producerId !== producerId)
+        throw new Error('Invalid receive source');
+      if (!local) lease = await federation.acquire(room, producerId, rtpCapabilities, router);
       const source = lease?.producer || (await consumableProducer(room, producerId, rtpCapabilities));
+      if (local && (room.routing.producerRouter(source.id) || room.router) !== router)
+        throw new Error('Create a receive transport for this screen');
       consumer = await transport.consume({ producerId: source.id, rtpCapabilities, paused: true });
       const consumed = consumer;
       if (!socket.connected || transport.closed) throw new Error('Participant disconnected');

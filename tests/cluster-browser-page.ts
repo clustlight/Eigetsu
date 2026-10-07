@@ -48,8 +48,12 @@ window.runClusterCheck = async (keepForRecovery = false) => {
       });
     return { socket, rpc, device: new Device() };
   };
-  const transport = async (peer, direction) => {
-    const info = await peer.rpc('transport:create', { direction });
+  const transport = async (peer, direction, producerId) => {
+    const info = await peer.rpc('transport:create', {
+      direction,
+      producerId,
+      newShare: direction === 'send' && !producerId,
+    });
     const result = peer.device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
     transports.push(result);
     result.on('connect', ({ dtlsParameters }, ok, fail) =>
@@ -61,7 +65,7 @@ window.runClusterCheck = async (keepForRecovery = false) => {
     return result;
   };
   const consume = async (peer, producerId) => {
-    const receiver = await transport(peer, 'recv');
+    const receiver = await transport(peer, 'recv', producerId);
     const info = await peer.rpc('consume', {
       transportId: receiver.id,
       producerId,

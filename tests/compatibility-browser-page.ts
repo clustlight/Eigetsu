@@ -39,8 +39,12 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
       );
     return { socket, rpc };
   };
-  const createTransport = async (peer, direction) => {
-    const info = await peer.rpc('transport:create', { direction });
+  const createTransport = async (peer, direction, producerId) => {
+    const info = await peer.rpc('transport:create', {
+      direction,
+      producerId,
+      newShare: direction === 'send' && !producerId,
+    });
     const transport = peer.device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
     transports.push(transport);
     transport.observer.once('close', () => peer.socket.emit('transport:close', { transportId: transport.id }));
@@ -102,7 +106,7 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
     viewer.socket.on('producer:new', (data) => announced.push(data));
     manager = createCompatibleVideoSender({
       getProducer: (id) => (video?.producer.id === id ? video.producer : undefined),
-      createTransport: () => createTransport(sender, 'send'),
+      createTransport: (producerId) => createTransport(sender, 'send', producerId),
       capabilities: sender.device.sendRtpCapabilities,
       onStatus: (_id, active) => {
         compatibilityActive = active;
@@ -134,7 +138,7 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
       /^4d00/i.test(video.producer.rtpParameters.codecs[0].parameters['profile-level-id']),
       'Test requires a Main-profile primary stream',
     );
-    const normalTransport = await createTransport(sender, 'recv');
+    const normalTransport = await createTransport(sender, 'recv', video.producer.id);
     const normalInfo = await sender.rpc('consume', {
       transportId: normalTransport.id,
       producerId: video.producer.id,
@@ -145,7 +149,10 @@ window.runCompatibilityCheck = async (inspectHardware = false, senderPort = 1300
       normalInfo.producerId === video.producer.id && compatibilityRequests === 0,
       'Compatible viewers must use the primary stream',
     );
-    const receiveTransports = await Promise.all([createTransport(viewer, 'recv'), createTransport(viewer, 'recv')]);
+    const receiveTransports = await Promise.all([
+      createTransport(viewer, 'recv', video.producer.id),
+      createTransport(viewer, 'recv', video.producer.id),
+    ]);
     const infos = await Promise.all(
       receiveTransports.map((transport) =>
         viewer.rpc('consume', {

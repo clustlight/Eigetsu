@@ -67,7 +67,7 @@ export function createCompatibleVideoSender({
     source.observer.once('close', entry.onSourceClose);
     entry.promise = (async () => {
       try {
-        entry.transport = await createTransport();
+        entry.transport = await createTransport(producerId);
         if (entry.closed) throw new Error('共有が終了しています');
         track.contentHint = 'motion';
         const options = screenShareEncodingOptions(compatiblePreset, track.getSettings());

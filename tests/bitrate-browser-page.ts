@@ -48,8 +48,12 @@ window.runBitrateCheck = async (
       }
     : device.sendRtpCapabilities;
   const codec = selectScreenShareCodec(sendRtpCapabilities);
-  const createTransport = async (direction = 'send') => {
-    const info = await rpc('transport:create', { direction });
+  const createTransport = async (direction = 'send', producerId) => {
+    const info = await rpc('transport:create', {
+      direction,
+      producerId,
+      newShare: direction === 'send' && !producerId,
+    });
     const transport = device[direction === 'send' ? 'createSendTransport' : 'createRecvTransport'](info);
     transport.observer.once('close', () => socket.emit('transport:close', { transportId: transport.id }));
     transport.on('connect', ({ dtlsParameters }, ok, fail) =>
@@ -96,7 +100,11 @@ window.runBitrateCheck = async (
   oscillator.connect(destination);
   oscillator.start();
   const audioShare = mode.startsWith('fixed')
-    ? await produceScreenShareAudio(createTransport, destination.stream.getAudioTracks()[0], {})
+    ? await produceScreenShareAudio(
+        (producerId) => createTransport('send', producerId),
+        destination.stream.getAudioTracks()[0],
+        { videoProducerId: producer.id },
+      )
     : null;
   const audioTransport = audioShare?.transport || transport;
   const audioProducer =
@@ -129,7 +137,7 @@ window.runBitrateCheck = async (
     // Observe real received dimensions as well as sender parameters, including
     // the 4K workload that previously triggered automatic downscaling.
     {
-      recvTransport = await createTransport('recv');
+      recvTransport = await createTransport('recv', producer.id);
       const info = await rpc('consume', {
         transportId: recvTransport.id,
         producerId: producer.id,

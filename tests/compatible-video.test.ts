@@ -75,7 +75,8 @@ test('concurrent compatibility requests share a bounded encoder and preserve the
       this.closed = true;
     },
   };
-  const { request, manager, clone, source } = fixture(async () => {
+  const { request, manager, clone, source } = fixture(async (producerId) => {
+    assert.equal(producerId, 'main');
     created++;
     return mockTransport(
       async (value) => {

@@ -76,10 +76,12 @@ test('audio negotiation failures release the generated track, context and transp
     },
     close: t.mock.fn(),
   };
-  const createTransport: CreateSendTransport = async () =>
-    transport as unknown as Awaited<ReturnType<CreateSendTransport>>;
+  const createTransport: CreateSendTransport = async (producerId) => {
+    assert.equal(producerId, 'screen');
+    return transport as unknown as Awaited<ReturnType<CreateSendTransport>>;
+  };
   await assert.rejects(
-    produceScreenShareAudio(createTransport, {} as MediaStreamTrack, {}),
+    produceScreenShareAudio(createTransport, {} as MediaStreamTrack, { videoProducerId: 'screen' }),
     (error) => error === failure,
   );
   assert.equal(output.stop.mock.callCount(), 1);
